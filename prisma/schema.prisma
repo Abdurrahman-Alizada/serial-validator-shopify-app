@@ -9,8 +9,8 @@ generator client {
 // enough when changing adapters.
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -29,4 +29,64 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+}
+
+model Product {
+  id              String    @id @default(cuid())
+  shopifyId       String    @unique
+  title           String
+  handle          String
+  productType     String?
+  vendor          String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  requireSerial   Boolean   @default(false)
+  shop            String
+  
+  variants        ProductVariant[]
+  serials         Serial[]
+  
+  @@map("products")
+}
+
+model ProductVariant {
+  id              String    @id @default(cuid())
+  shopifyId       String    @unique
+  productId       String
+  title           String
+  sku             String?
+  price           String?
+  inventoryQty    Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  requireSerial   Boolean   @default(false)
+  
+  product         Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  serials         Serial[]
+  
+  @@map("product_variants")
+}
+
+model Serial {
+  id              String    @id @default(cuid())
+  serialNumber    String    @unique
+  productId       String?
+  variantId       String?
+  orderId         String?
+  status          SerialStatus @default(AVAILABLE)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  shop            String
+  
+  product         Product?  @relation(fields: [productId], references: [id])
+  variant         ProductVariant? @relation(fields: [variantId], references: [id])
+  
+  @@map("serials")
+}
+
+enum SerialStatus {
+  AVAILABLE
+  SOLD
+  RETURNED
+  DELETED
 }
