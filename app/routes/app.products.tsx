@@ -1,27 +1,165 @@
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { 
-  Page, 
-  Card, 
-  Text, 
-  Button, 
-  BlockStack, 
-  InlineStack, 
+import {
+  Page,
+  Card,
+  Text,
+  Button,
+  BlockStack,
+  InlineStack,
   TextField,
   Select,
   DataTable,
-  Pagination,
-  Checkbox
+  Pagination
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
+import { useLoaderData, useFetcher } from "react-router";
+import prisma, {
+  syncProduct,
+  syncProductVariant,
+  updateProductSerialRequirement,
+  updateVariantSerialRequirement
+} from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const { admin, session } = await authenticate.admin(request);
+
+  try {
+    // Fetch products from Shopify
+    const response = await admin.graphql(
+      `#graphql
+        query getProducts($first: Int!) {
+          products(first: $first) {
+            edges {
+              node {
+                id
+                title
+                handle
+                productType
+                vendor
+                variants(first: 10) {
+                  edges {
+                    node {
+                      id
+                      title
+                      sku
+                      price
+                      inventoryQuantity
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }`,
+      {
+        variables: {
+          first: 50,
+        },
+      }
+    );
+
+    const data = await response.json();
+    const shopifyProducts = data.data?.products?.edges || [];
+
+    // Sync products to database
+    const dbProducts = [];
+    for (const edge of shopifyProducts) {
+      const product = edge.node;
+      const shopifyId = product.id.replace('gid://shopify/Product/', '');
+
+      const dbProduct = await syncProduct({
+        shopifyId,
+        title: product.title,
+        handle: product.handle,
+        productType: product.productType,
+        vendor: product.vendor,
+        shop: session.shop,
+      });
+
+      // Sync variants
+      const variants = [];
+      for (const variantEdge of product.variants.edges) {
+        const variant = variantEdge.node;
+        const variantShopifyId = variant.id.replace('gid://shopify/ProductVariant/', '');
+
+        const dbVariant = await syncProductVariant({
+          shopifyId: variantShopifyId,
+          productId: dbProduct.id,
+          title: variant.title,
+          sku: variant.sku,
+          price: variant.price,
+          inventoryQty: variant.inventoryQuantity,
+        });
+
+        // Get serial count for this variant
+        const serialCount = await prisma.serial.count({
+          where: { variantId: dbVariant.id },
+        });
+
+        variants.push({
+          ...dbVariant,
+          _count: { serials: serialCount },
+        });
+      }
+
+      dbProducts.push({
+        ...dbProduct,
+        variants,
+      });
+    }
+
+    return { products: dbProducts };
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    return { products: [] };
+  }
+};
+
+export const action = async ({ request }: ActionFunctionArgs) => {
   await authenticate.admin(request);
-  return null;
+
+  const formData = await request.formData();
+  const intent = formData.get("intent") as string;
+
+  try {
+    if (intent === "toggleProductSerial") {
+      const productId = formData.get("productId") as string;
+      const requireSerial = formData.get("requireSerial") === "true";
+
+      await updateProductSerialRequirement({
+        id: productId,
+        requireSerial,
+      });
+
+      return { success: true };
+    }
+
+    if (intent === "toggleVariantSerial") {
+      const variantId = formData.get("variantId") as string;
+      const requireSerial = formData.get("requireSerial") === "true";
+
+      await updateVariantSerialRequirement({
+        id: variantId,
+        requireSerial,
+      });
+
+      return { success: true };
+    }
+
+    // TODO: Add edit/delete functionality
+
+    return { success: false, message: "Unknown action" };
+  } catch (error) {
+    console.error("Action error:", error);
+    return { success: false, message: "Action failed" };
+  }
 };
 
 export default function Products() {
+  const { products } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher();
   const [searchValue, setSearchValue] = useState('');
   const [productTypeFilter, setProductTypeFilter] = useState('All');
   const [vendorFilter, setVendorFilter] = useState('All');
@@ -57,7 +195,16 @@ export default function Products() {
   // Toggle component using CSS
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: () => void }) => (
     <div
+      role="switch"
+      aria-checked={checked}
+      tabIndex={0}
       onClick={onChange}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onChange();
+        }
+      }}
       style={{
         width: '48px',
         height: '24px',
@@ -84,57 +231,42 @@ export default function Products() {
     </div>
   );
 
-  const rows = [
-    [
-      'Eco-Friendly Water Bottle',
-      '500ml',
-      'WB-500-GRN',
-      '25',
-      <Toggle key="toggle-1" checked={true} onChange={() => {}} />
-    ],
-    [
-      'Organic Cotton T-Shirt',
-      'Medium',
-      'TS-M-ORG',
-      '42',
-      <Toggle key="toggle-2" checked={false} onChange={() => {}} />
-    ],
-    [
-      'Wireless Headphones',
-      'Black',
-      'HP-WL-BLK',
-      '18',
-      <Toggle key="toggle-3" checked={true} onChange={() => {}} />
-    ],
-    [
-      'Leather Wallet',
-      'Brown',
-      'WL-BRN-LTH',
-      '60',
-      <Toggle key="toggle-4" checked={false} onChange={() => {}} />
-    ],
-    [
-      'Stainless Steel Watch',
-      'Silver',
-      'WT-SLV-STL',
-      '33',
-      <Toggle key="toggle-5" checked={true} onChange={() => {}} />
-    ],
-    [
-      'Bamboo Toothbrush',
-      'Single',
-      'TB-BAM-SGL',
-      '105',
-      <Toggle key="toggle-6" checked={false} onChange={() => {}} />
-    ],
-    [
-      'Recycled Paper Notebook',
-      'A5',
-      'NB-A5-REC',
-      '80',
-      <Toggle key="toggle-7" checked={false} onChange={() => {}} />
-    ],
-  ];
+  // Generate rows from real product data
+  const rows = products.flatMap((product) =>
+    product.variants.map((variant) => [
+      product.title,
+      variant.title || 'Default Title',
+      variant.sku || '-',
+      ((variant as { _count?: { serials: number } })._count?.serials?.toString() || '0'),
+      <Toggle
+        key={`toggle-${variant.id}`}
+        checked={variant.requireSerial}
+        onChange={() => {
+          fetcher.submit(
+            {
+              intent: 'toggleVariantSerial',
+              variantId: variant.id,
+              requireSerial: (!variant.requireSerial).toString(),
+            },
+            { method: 'post' }
+          );
+        }}
+      />,
+      <InlineStack key={`actions-${variant.id}`} gap="200">
+        <Button size="micro" variant="plain" onClick={() => console.log('Edit', variant.id)}>
+          ✏️
+        </Button>
+        <Button
+          size="micro"
+          variant="plain"
+          tone="critical"
+          onClick={() => console.log('Delete', variant.id)}
+        >
+          🗑️
+        </Button>
+      </InlineStack>
+    ])
+  );
 
   return (
     <Page title="Products">
@@ -142,7 +274,7 @@ export default function Products() {
         <Text as="p" variant="bodyMd" tone="subdued">
           Manage serial numbers for products and variants sold via POS
         </Text>
-        
+
         <Card>
           <BlockStack gap="400">
             {/* Search and Filter Controls */}
@@ -175,7 +307,7 @@ export default function Products() {
                   />
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <Text as="label" variant="bodyMd" tone="subdued">Sort</Text>
+                  <Text as="p" variant="bodyMd" tone="subdued">Sort</Text>
                   <Button>Sort</Button>
                 </div>
               </InlineStack>
@@ -185,8 +317,9 @@ export default function Products() {
             <DataTable
               columnContentTypes={[
                 'text',
-                'text', 
                 'text',
+                'text',
+                'numeric',
                 'text',
                 'text',
               ]}
@@ -196,6 +329,7 @@ export default function Products() {
                 'SKU',
                 'Serial Numbers',
                 'Require Serial',
+                'Actions',
               ]}
               rows={rows}
             />
