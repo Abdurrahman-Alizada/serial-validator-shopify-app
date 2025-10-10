@@ -2,12 +2,11 @@
 
 client_id = "1fe9971d4c87626bcf8280cf64f35666"
 name = "serail-validator"
-application_url = "https://example.com"
+application_url = "https://serial-validator-shopify-app-production.up.railway.app"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-01"
@@ -25,4 +24,4 @@ api_version = "2026-01"
 scopes = "write_products"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://serial-validator-shopify-app-production.up.railway.app/api/auth" ]
