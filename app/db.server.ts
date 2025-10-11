@@ -38,12 +38,41 @@ export async function createSerial({
   });
 }
 
+export async function createBulkSerials({
+  serialNumbers,
+  shop,
+}: {
+  serialNumbers: string[];
+  shop: string;
+}) {
+  return await prisma.serial.createMany({
+    data: serialNumbers.map(serialNumber => ({
+      serialNumber,
+      shop,
+      status: "AVAILABLE" as const,
+    })),
+    skipDuplicates: true,
+  });
+}
+
 export async function getSerials(shop: string) {
   return await prisma.serial.findMany({
     where: { shop },
     include: {
       product: true,
       variant: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export async function getUnassignedSerials(shop: string) {
+  return await prisma.serial.findMany({
+    where: { 
+      shop,
+      productId: null,
+      variantId: null,
+      status: "AVAILABLE"
     },
     orderBy: { createdAt: "desc" },
   });
@@ -59,6 +88,83 @@ export async function updateSerialStatus({
   return await prisma.serial.update({
     where: { id },
     data: { status },
+  });
+}
+
+export async function assignSerialsToVariant({
+  serialIds,
+  productId,
+  variantId,
+}: {
+  serialIds: string[];
+  productId: string;
+  variantId: string;
+}) {
+  // Enforce single serial per variant constraint
+  if (serialIds.length > 1) {
+    throw new Error("Only one serial number can be assigned to a variant");
+  }
+
+  // Check if this variant already has a serial assigned
+  const existingSerial = await prisma.serial.findFirst({
+    where: {
+      variantId,
+      status: { in: ["RESERVED", "SOLD"] }
+    },
+    select: { serialNumber: true }
+  });
+
+  if (existingSerial) {
+    throw new Error(`This variant already has a serial number assigned: ${existingSerial.serialNumber}`);
+  }
+
+  // First check if any of these serials are already assigned
+  const alreadyAssigned = await prisma.serial.findMany({
+    where: {
+      id: { in: serialIds },
+      OR: [
+        { productId: { not: null } },
+        { variantId: { not: null } }
+      ]
+    },
+    select: { serialNumber: true }
+  });
+
+  if (alreadyAssigned.length > 0) {
+    throw new Error(`Some serial numbers are already assigned: ${alreadyAssigned.map(s => s.serialNumber).join(', ')}`);
+  }
+
+  // Update only unassigned serials
+  return await prisma.serial.updateMany({
+    where: { 
+      id: { in: serialIds },
+      productId: null,
+      variantId: null,
+      status: "AVAILABLE"
+    },
+    data: {
+      productId,
+      variantId,
+      status: "RESERVED",
+    },
+  });
+}
+
+export async function releaseSerialsFromVariant({
+  serialIds,
+}: {
+  serialIds: string[];
+}) {
+  return await prisma.serial.updateMany({
+    where: { 
+      id: { in: serialIds },
+      status: { in: ["RESERVED", "AVAILABLE"] }
+    },
+    data: {
+      productId: null,
+      variantId: null,
+      status: "AVAILABLE",
+    },
   });
 }
 
@@ -146,19 +252,6 @@ export async function getProducts(shop: string) {
   });
 }
 
-export async function updateProductSerialRequirement({
-  id,
-  requireSerial,
-}: {
-  id: string;
-  requireSerial: boolean;
-}) {
-  return await prisma.product.update({
-    where: { id },
-    data: { requireSerial },
-  });
-}
-
 export async function updateVariantSerialRequirement({
   id,
   requireSerial,
@@ -167,6 +260,19 @@ export async function updateVariantSerialRequirement({
   requireSerial: boolean;
 }) {
   return await prisma.productVariant.update({
+    where: { id },
+    data: { requireSerial },
+  });
+}
+
+export async function updateProductSerialRequirement({
+  id,
+  requireSerial,
+}: {
+  id: string;
+  requireSerial: boolean;
+}) {
+  return await prisma.product.update({
     where: { id },
     data: { requireSerial },
   });

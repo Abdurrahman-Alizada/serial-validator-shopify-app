@@ -15,11 +15,18 @@ import {
   Pagination,
   Badge,
   Modal,
-  FormLayout
+  FormLayout,
+  DropZone,
+  List,
+  Checkbox,
+  Spinner,
+  EmptyState,
+  SkeletonBodyText,
+  SkeletonDisplayText
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useFetcher, useLoaderData } from "react-router";
-import prisma, { createSerial } from "../db.server";
+import prisma, { createSerial, getUnassignedSerials } from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -37,9 +44,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     // Get stats
     const totalSerials = serials.length;
-    const soldCount = serials.filter(s => s.status === 'SOLD').length;
     const availableCount = serials.filter(s => s.status === 'AVAILABLE').length;
+    const reservedCount = serials.filter(s => s.status === 'RESERVED').length;
+    const soldCount = serials.filter(s => s.status === 'SOLD').length;
     const returnedCount = serials.filter(s => s.status === 'RETURNED').length;
+    const deletedCount = serials.filter(s => s.status === 'DELETED').length;
 
     // Get all products with variants for the modal dropdowns
     const products = await prisma.product.findMany({
@@ -50,22 +59,45 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { title: 'asc' },
     });
 
+    // Get all variants with their products for easier variant-centric workflow
+    const variants = await prisma.productVariant.findMany({
+      where: {
+        product: { shop: session.shop }
+      },
+      include: {
+        product: true,
+      },
+      orderBy: [
+        { product: { title: 'asc' } },
+        { title: 'asc' }
+      ]
+    });
+
+    // Get unassigned serials for the assignment modal
+    const unassignedSerials = await getUnassignedSerials(session.shop);
+
     return {
       serials,
       stats: {
         total: totalSerials,
-        sold: soldCount,
         available: availableCount,
+        reserved: reservedCount,
+        sold: soldCount,
         returned: returnedCount,
+        deleted: deletedCount,
       },
       products,
+      variants,
+      unassignedSerials,
     };
   } catch (error) {
     console.error('Error loading dashboard data:', error);
     return {
       serials: [],
-      stats: { total: 0, sold: 0, available: 0, returned: 0 },
+      stats: { total: 0, available: 0, reserved: 0, sold: 0, returned: 0, deleted: 0 },
       products: [],
+      variants: [],
+      unassignedSerials: [],
     };
   }
 };
@@ -81,15 +113,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const productId = formData.get("productId") as string;
     const variantId = formData.get("variantId") as string;
 
-    if (!serialNumber || !productId || !variantId) {
-      return { success: false, message: "All fields are required" };
+    if (!serialNumber) {
+      return { success: false, message: "Serial number is required" };
     }
 
     try {
       await createSerial({
         serialNumber,
-        productId,
-        variantId,
+        productId: productId || undefined,
+        variantId: variantId || undefined,
         shop: session.shop,
       });
 
@@ -104,15 +136,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Dashboard() {
-  const { serials, stats, products } = useLoaderData<typeof loader>();
+  const { serials, stats, products, variants, unassignedSerials } = useLoaderData<typeof loader>();
   const [searchValue, setSearchValue] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
+  const [productFilter, setProductFilter] = useState('All');
+  const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   const [modalActive, setModalActive] = useState(false);
+  const [bulkImportModalActive, setBulkImportModalActive] = useState(false);
   const [serialNumber, setSerialNumber] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
+  const [bulkCsvFile, setBulkCsvFile] = useState<File | null>(null);
+  const [csvPreviewData, setCsvPreviewData] = useState<string[]>([]);
+  const [showCsvPreview, setShowCsvPreview] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState('');
 
   const fetcher = useFetcher();
+  const isLoading = fetcher.state === "submitting" || fetcher.state === "loading";
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchValue(value);
@@ -122,12 +162,14 @@ export default function Dashboard() {
     setStatusFilter(value);
   }, []);
 
+  const handleProductFilterChange = useCallback((value: string) => {
+    setProductFilter(value);
+  }, []);
+
   const handleModalToggle = useCallback(() => {
     setModalActive(!modalActive);
     if (!modalActive) {
-      // Reset form when opening modal
       setSerialNumber('');
-      setSelectedProduct('');
       setSelectedVariant('');
     }
   }, [modalActive]);
@@ -136,60 +178,202 @@ export default function Dashboard() {
     setSerialNumber(value);
   }, []);
 
-  const handleProductChange = useCallback((value: string) => {
-    setSelectedProduct(value);
-    setSelectedVariant(''); // Reset variant when product changes
-  }, []);
-
   const handleVariantChange = useCallback((value: string) => {
     setSelectedVariant(value);
   }, []);
 
   const handleSubmit = useCallback(() => {
+    const selectedVariantData = variants?.find(v => v.id === selectedVariant);
+    const productId = selectedVariantData?.productId;
+
     fetcher.submit(
       {
         intent: 'addSerial',
         serialNumber,
-        productId: selectedProduct,
+        productId: productId || '',
         variantId: selectedVariant,
       },
       { method: 'post' }
     );
-    // Reset form and close modal
     setModalActive(false);
     setSerialNumber('');
-    setSelectedProduct('');
     setSelectedVariant('');
-  }, [fetcher, serialNumber, selectedProduct, selectedVariant]);
+  }, [fetcher, serialNumber, selectedVariant, variants]);
+
+  const handleBulkImportToggle = useCallback(() => {
+    setBulkImportModalActive(!bulkImportModalActive);
+    if (!bulkImportModalActive) {
+      setBulkCsvFile(null);
+      setCsvPreviewData([]);
+      setShowCsvPreview(false);
+      setEditingIndex(null);
+      setEditValue('');
+    }
+  }, [bulkImportModalActive]);
+
+  const processCsvFile = useCallback(async (file: File) => {
+    const text = await file.text();
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+
+    // Handle different CSV formats
+    let serials: string[] = [];
+
+    for (const line of lines) {
+      if (line.includes(',')) {
+        // Comma-separated values
+        const values = line.split(',').map(v => v.trim()).filter(v => v);
+        serials.push(...values);
+      } else {
+        // One per line
+        serials.push(line);
+      }
+    }
+
+    // Remove potential headers
+    let filteredSerials = serials.filter(serial =>
+      serial.toLowerCase() !== 'serial' &&
+      serial.toLowerCase() !== 'serialnumber' &&
+      serial.toLowerCase() !== 'serial_number' &&
+      serial.length > 0
+    );
+
+    // Remove duplicates (case-insensitive)
+    const uniqueSerials: string[] = [];
+    const seen = new Set<string>();
+
+    filteredSerials.forEach(serial => {
+      const lowerSerial = serial.toLowerCase();
+      if (!seen.has(lowerSerial)) {
+        seen.add(lowerSerial);
+        uniqueSerials.push(serial);
+      }
+    });
+
+    setCsvPreviewData(uniqueSerials);
+    setShowCsvPreview(true);
+  }, []);
+
+  const handleCsvFileSelect = useCallback((files: File[]) => {
+    const file = files[0];
+    setBulkCsvFile(file);
+    if (file) {
+      processCsvFile(file);
+    }
+  }, [processCsvFile]);
+
+  const handleEditSerial = useCallback((index: number, value: string) => {
+    setEditingIndex(index);
+    setEditValue(value);
+  }, []);
+
+  const handleSaveEdit = useCallback(() => {
+    if (editingIndex !== null && editValue.trim()) {
+      const trimmedValue = editValue.trim();
+
+      // Check for duplicates (excluding the current index)
+      const isDuplicate = csvPreviewData.some((serial, index) =>
+        index !== editingIndex && serial.trim().toLowerCase() === trimmedValue.toLowerCase()
+      );
+
+      if (isDuplicate) {
+        // You could show a toast/banner here, for now we'll just not save
+        alert('This serial number already exists in the list!');
+        return;
+      }
+
+      const newData = [...csvPreviewData];
+      newData[editingIndex] = trimmedValue;
+      setCsvPreviewData(newData);
+      setEditingIndex(null);
+      setEditValue('');
+    }
+  }, [editingIndex, editValue, csvPreviewData]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingIndex(null);
+    setEditValue('');
+  }, []);
+
+  const handleDeleteSerial = useCallback((index: number) => {
+    const newData = csvPreviewData.filter((_, i) => i !== index);
+    setCsvPreviewData(newData);
+  }, [csvPreviewData]);
+
+  const handleAddSerial = useCallback(() => {
+    setCsvPreviewData([...csvPreviewData, '']);
+    setEditingIndex(csvPreviewData.length);
+    setEditValue('');
+  }, [csvPreviewData]);
+
+  const handleBulkImport = useCallback(() => {
+    if (csvPreviewData.length === 0) return;
+
+    // Create a CSV content from the preview data
+    const csvContent = csvPreviewData.filter(serial => serial.trim().length > 0).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const file = new File([blob], 'preview-serials.csv', { type: 'text/csv' });
+
+    const formData = new FormData();
+    formData.append('csvFile', file);
+
+    fetcher.submit(formData, {
+      method: 'post',
+      action: '/api/bulk-import-unassigned',
+      encType: 'multipart/form-data'
+    });
+
+    setBulkImportModalActive(false);
+    setBulkCsvFile(null);
+    setCsvPreviewData([]);
+    setShowCsvPreview(false);
+    setEditingIndex(null);
+    setEditValue('');
+  }, [fetcher, csvPreviewData]);
+
+  const handleSerialSelection = useCallback((serialId: string, checked: boolean) => {
+    setSelectedSerials(prev => {
+      if (checked) {
+        return [...prev, serialId];
+      } else {
+        return prev.filter(id => id !== serialId);
+      }
+    });
+  }, []);
+
+  const handleSelectAll = useCallback((checked: boolean) => {
+    if (checked) {
+      setSelectedSerials(filteredSerials.map(serial => serial.id));
+    } else {
+      setSelectedSerials([]);
+    }
+  }, []);
 
   const statusOptions = [
     { label: 'All', value: 'All' },
     { label: 'Available', value: 'AVAILABLE' },
+    { label: 'Reserved', value: 'RESERVED' },
     { label: 'Sold', value: 'SOLD' },
     { label: 'Returned', value: 'RETURNED' },
     { label: 'Deleted', value: 'DELETED' },
   ];
 
-  // Generate product options from real data
-  const productOptions = [
-    { label: 'Select Product', value: '' },
+  const variantOptions = [
+    { label: 'Select Variant', value: '' },
+    ...(variants || []).map(variant => ({
+      label: `${variant.product?.title} - ${variant.title || 'Default Variant'}`,
+      value: variant.id,
+    })),
+  ];
+
+  const productFilterOptions = [
+    { label: 'All Products', value: 'All' },
     ...products.map(product => ({
       label: product.title,
       value: product.id,
     })),
   ];
 
-  // Generate variant options based on selected product
-  const selectedProductData = products.find(p => p.id === selectedProduct);
-  const variantOptions = [
-    { label: 'Select Variant', value: '' },
-    ...(selectedProductData?.variants || []).map(variant => ({
-      label: variant.title || 'Default Title',
-      value: variant.id,
-    })),
-  ];
-
-  // Filter serials based on search and status
+  // Filter serials based on search, status, and product
   const filteredSerials = serials.filter(serial => {
     const matchesSearch = !searchValue ||
       serial.serialNumber.toLowerCase().includes(searchValue.toLowerCase()) ||
@@ -197,8 +381,9 @@ export default function Dashboard() {
       serial.product?.title.toLowerCase().includes(searchValue.toLowerCase());
 
     const matchesStatus = statusFilter === 'All' || serial.status === statusFilter;
+    const matchesProduct = productFilter === 'All' || serial.productId === productFilter;
 
-    return matchesSearch && matchesStatus;
+    return matchesSearch && matchesStatus && matchesProduct;
   });
 
   // Helper function to get badge tone based on status
@@ -219,6 +404,12 @@ export default function Dashboard() {
 
   // Generate rows from real data
   const rows = filteredSerials.map((serial) => [
+    <Checkbox
+      key={`checkbox-${serial.id}`}
+      label=""
+      checked={selectedSerials.includes(serial.id)}
+      onChange={(checked) => handleSerialSelection(serial.id, checked)}
+    />,
     serial.serialNumber,
     serial.product?.title || 'N/A',
     serial.variant?.title || 'N/A',
@@ -244,7 +435,7 @@ export default function Dashboard() {
       <BlockStack gap="500">
         {/* Stats Cards */}
         <Grid>
-          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 3, xl: 3}}>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Total Serials</Text>
@@ -252,27 +443,43 @@ export default function Dashboard() {
               </BlockStack>
             </Card>
           </Grid.Cell>
-          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 3, xl: 3}}>
-            <Card>
-              <BlockStack gap="200">
-                <Text as="p" variant="bodySm" tone="subdued">Sold</Text>
-                <Text as="p" variant="heading2xl">{stats.sold.toLocaleString()}</Text>
-              </BlockStack>
-            </Card>
-          </Grid.Cell>
-          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 3, xl: 3}}>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Available</Text>
-                <Text as="p" variant="heading2xl">{stats.available.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl" tone="success">{stats.available.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
-          <Grid.Cell columnSpan={{xs: 6, sm: 3, md: 3, lg: 3, xl: 3}}>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
+            <Card>
+              <BlockStack gap="200">
+                <Text as="p" variant="bodySm" tone="subdued">Reserved</Text>
+                <Text as="p" variant="heading2xl" tone="warning">{stats.reserved.toLocaleString()}</Text>
+              </BlockStack>
+            </Card>
+          </Grid.Cell>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
+            <Card>
+              <BlockStack gap="200">
+                <Text as="p" variant="bodySm" tone="subdued">Sold</Text>
+                <Text as="p" variant="heading2xl" tone="info">{stats.sold.toLocaleString()}</Text>
+              </BlockStack>
+            </Card>
+          </Grid.Cell>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Returned</Text>
-                <Text as="p" variant="heading2xl">{stats.returned.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl" tone="subdued">{stats.returned.toLocaleString()}</Text>
+              </BlockStack>
+            </Card>
+          </Grid.Cell>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
+            <Card>
+              <BlockStack gap="200">
+                <Text as="p" variant="bodySm" tone="subdued">Deleted</Text>
+                <Text as="p" variant="heading2xl" tone="critical">{stats.deleted.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
@@ -284,22 +491,47 @@ export default function Dashboard() {
             <InlineStack align="space-between">
               <Text as="h2" variant="headingLg">Serial Management</Text>
               <InlineStack gap="300">
-                <Button variant="primary" onClick={handleModalToggle}>Add Serial</Button>
-                <Button>Import CSV</Button>
-                <Button>Export CSV</Button>
+                <Button
+                  variant="primary"
+                  onClick={handleModalToggle}
+                  loading={isLoading}
+                  disabled={isLoading}
+                >
+                  Add Serial
+                </Button>
+                <Button
+                  onClick={handleBulkImportToggle}
+                  disabled={isLoading}
+                >
+                  Bulk Import (Unassigned)
+                </Button>
+                <Button
+                  onClick={() => window.open(`/api/export-serials?format=csv`, '_blank')}
+                  disabled={isLoading}
+                >
+                  Export CSV
+                </Button>
               </InlineStack>
             </InlineStack>
 
             {/* Search and Filter */}
             <InlineStack gap="400" align="space-between">
-              <div style={{ flexGrow: 1, maxWidth: '400px' }}>
+              <div style={{ flexGrow: 1, maxWidth: '350px' }}>
                 <TextField
-                  label=""
+                  label="Search"
                   value={searchValue}
                   onChange={handleSearchChange}
                   placeholder="Search by serial or order id..."
                   prefix="🔍"
                   autoComplete="off"
+                />
+              </div>
+              <div style={{ minWidth: '150px' }}>
+                <Select
+                  label="Product"
+                  options={productFilterOptions}
+                  value={productFilter}
+                  onChange={handleProductFilterChange}
                 />
               </div>
               <div style={{ minWidth: '150px' }}>
@@ -312,28 +544,59 @@ export default function Dashboard() {
               </div>
             </InlineStack>
 
-            {/* Data Table */}
-            <DataTable
-              columnContentTypes={[
-                'text',
-                'text',
-                'text',
-                'text',
-                'text',
-                'text',
-                'text',
-              ]}
-              headings={[
-                'Serial Number',
-                'Product Name',
-                'Variant',
-                'Status',
-                'Order ID',
-                'Last Updated',
-                'Actions',
-              ]}
-              rows={rows}
-            />
+            {/* Data Table or Empty State */}
+            {filteredSerials.length === 0 ? (
+              <EmptyState
+                heading="No serial numbers found"
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <p>
+                  {serials.length === 0
+                    ? "Get started by adding your first serial number or importing them in bulk."
+                    : "Try adjusting your search or filter criteria to see more results."
+                  }
+                </p>
+                {serials.length === 0 && (
+                  <InlineStack gap="300" align="center">
+                    <Button variant="primary" onClick={handleModalToggle}>
+                      Add Serial Number
+                    </Button>
+                    <Button onClick={handleBulkImportToggle}>
+                      Bulk Import
+                    </Button>
+                  </InlineStack>
+                )}
+              </EmptyState>
+            ) : (
+              <DataTable
+                columnContentTypes={[
+                  'text',
+                  'text',
+                  'text',
+                  'text',
+                  'text',
+                  'text',
+                  'text',
+                  'text',
+                ]}
+                headings={[
+                  <Checkbox
+                    key="select-all"
+                    label=""
+                    checked={selectedSerials.length === filteredSerials.length && filteredSerials.length > 0}
+                    onChange={handleSelectAll}
+                  />,
+                  'Serial Number',
+                  'Product Name',
+                  'Variant',
+                  'Status',
+                  'Order ID',
+                  'Last Updated',
+                  'Actions',
+                ]}
+                rows={rows}
+              />
+            )}
 
             {/* Pagination */}
             <InlineStack align="space-between">
@@ -359,7 +622,8 @@ export default function Dashboard() {
         primaryAction={{
           content: 'Add Serial',
           onAction: handleSubmit,
-          disabled: !serialNumber.trim() || !selectedProduct || !selectedVariant,
+          disabled: !serialNumber.trim() || isLoading,
+          loading: isLoading,
         }}
         secondaryActions={[
           {
@@ -380,21 +644,214 @@ export default function Dashboard() {
             />
 
             <Select
-              label="Product"
-              options={productOptions}
-              value={selectedProduct}
-              onChange={handleProductChange}
-              placeholder="Select a product"
-            />
-
-            <Select
-              label="Variant"
+              label="Product Variant (Optional)"
               options={variantOptions}
               value={selectedVariant}
               onChange={handleVariantChange}
-              placeholder="Select a variant"
-              disabled={!selectedProduct}
+              placeholder="Select a product variant (optional)"
+              helpText="Leave empty to create unassigned serial numbers"
             />
+          </FormLayout>
+        </Modal.Section>
+      </Modal>
+
+      {/* Bulk Import Modal */}
+      <Modal
+        open={bulkImportModalActive}
+        onClose={handleBulkImportToggle}
+        title="Bulk Import Unassigned Serial Numbers"
+        primaryAction={{
+          content: showCsvPreview
+            ? `Import ${csvPreviewData.filter(s => s.trim().length > 0).length} Serial${csvPreviewData.filter(s => s.trim().length > 0).length !== 1 ? 's' : ''}`
+            : 'Import Serials',
+          onAction: handleBulkImport,
+          disabled: (() => {
+            if (isLoading) return true;
+            if (!bulkCsvFile && !showCsvPreview) return true;
+            if (showCsvPreview) {
+              const validSerials = csvPreviewData.filter(s => s.trim().length > 0);
+              if (validSerials.length === 0) return true;
+
+              // Check for duplicates
+              const hasDuplicates = validSerials.some((serial, index) =>
+                validSerials.findIndex(s => s.toLowerCase() === serial.toLowerCase()) !== index
+              );
+
+              return hasDuplicates;
+            }
+            return false;
+          })(),
+          loading: isLoading,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: handleBulkImportToggle,
+          },
+        ]}
+      >
+        <Modal.Section>
+          <FormLayout>
+            <Text as="p" variant="bodyMd" tone="subdued">
+              Import serial numbers in bulk without assigning them to any product. These can be assigned later using the product assignment feature.
+            </Text>
+
+            <DropZone
+              label="CSV File"
+              onDrop={handleCsvFileSelect}
+              accept=".csv,text/csv"
+              allowMultiple={false}
+            >
+              <DropZone.FileUpload />
+            </DropZone>
+
+            <Text as="p" variant="bodyMd" tone="subdued">
+              CSV format: One serial number per line, or comma-separated values.
+              Example: SN001, SN002, SN003 or one per line. These serials will be imported as unassigned and can be assigned to products later.
+            </Text>
+
+            {/* CSV Preview Section */}
+            {showCsvPreview && csvPreviewData.length > 0 && (
+              <Card>
+                <BlockStack gap="300">
+                  <InlineStack align="space-between">
+                    <Text as="h3" variant="headingSm">
+                      Preview ({csvPreviewData.filter(s => s.trim().length > 0).length} serial numbers)
+                    </Text>
+                    <InlineStack gap="200">
+                      <Button
+                        size="micro"
+                        onClick={handleAddSerial}
+                        disabled={isLoading}
+                      >
+                        + Add Serial
+                      </Button>
+                      <Button
+                        size="micro"
+                        variant="plain"
+                        tone="critical"
+                        onClick={() => {
+                          setCsvPreviewData([]);
+                          setShowCsvPreview(false);
+                          setBulkCsvFile(null);
+                        }}
+                        disabled={isLoading}
+                      >
+                        Clear All
+                      </Button>
+                    </InlineStack>
+                  </InlineStack>
+
+                  <div style={{
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    border: '1px solid #e1e3e5',
+                    borderRadius: '6px',
+                    padding: '8px'
+                  }}>
+                    <BlockStack gap="100">
+                      {csvPreviewData.map((serial, index) => (
+                        <div key={index} style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          padding: '4px',
+                          backgroundColor: index % 2 === 0 ? '#f9f9f9' : 'transparent',
+                          borderRadius: '4px'
+                        }}>
+                          <Text as="span" variant="bodySm" tone="subdued" style={{ minWidth: '30px' }}>
+                            {index + 1}.
+                          </Text>
+
+                          {editingIndex === index ? (
+                            <InlineStack gap="100" align="start" blockAlign="center">
+                              <TextField
+                                label=""
+                                value={editValue}
+                                onChange={setEditValue}
+                                autoComplete="off"
+                                size="slim"
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    handleSaveEdit();
+                                  } else if (e.key === 'Escape') {
+                                    handleCancelEdit();
+                                  }
+                                }}
+                                autoFocus
+                              />
+                              <Button size="micro" variant="primary" onClick={handleSaveEdit}>
+                                ✓
+                              </Button>
+                              <Button size="micro" onClick={handleCancelEdit}>
+                                ✕
+                              </Button>
+                            </InlineStack>
+                          ) : (
+                            <InlineStack gap="100" align="space-between" blockAlign="center">
+                              <Text as="span" variant="bodyMd" style={{ flex: 1 }}>
+                                {serial || <em style={{ color: '#999' }}>Empty</em>}
+                              </Text>
+                              <InlineStack gap="50">
+                                <Button
+                                  size="micro"
+                                  variant="plain"
+                                  onClick={() => handleEditSerial(index, serial)}
+                                  disabled={isLoading}
+                                >
+                                  ✏️
+                                </Button>
+                                <Button
+                                  size="micro"
+                                  variant="plain"
+                                  tone="critical"
+                                  onClick={() => handleDeleteSerial(index)}
+                                  disabled={isLoading}
+                                >
+                                  🗑️
+                                </Button>
+                              </InlineStack>
+                            </InlineStack>
+                          )}
+                        </div>
+                      ))}
+                    </BlockStack>
+                  </div>
+
+                  {/* Validation Messages */}
+                  <BlockStack gap="200">
+                    {csvPreviewData.filter(s => s.trim().length > 0).length !== csvPreviewData.length && (
+                      <Text as="p" variant="bodySm" tone="warning">
+                        Warning: {csvPreviewData.length - csvPreviewData.filter(s => s.trim().length > 0).length} empty entries will be skipped during import.
+                      </Text>
+                    )}
+
+                    {(() => {
+                      const validSerials = csvPreviewData.filter(s => s.trim().length > 0);
+                      const duplicates = validSerials.filter((serial, index) =>
+                        validSerials.findIndex(s => s.toLowerCase() === serial.toLowerCase()) !== index
+                      );
+
+                      if (duplicates.length > 0) {
+                        return (
+                          <Text as="p" variant="bodySm" tone="critical">
+                            Error: {duplicates.length} duplicate serial number(s) detected. Please remove duplicates before importing.
+                          </Text>
+                        );
+                      }
+
+                      return null;
+                    })()}
+
+                    {csvPreviewData.filter(s => s.trim().length > 0).length > 0 && (
+                      <Text as="p" variant="bodySm" tone="success">
+                        Ready to import {csvPreviewData.filter(s => s.trim().length > 0).length} valid serial number{csvPreviewData.filter(s => s.trim().length > 0).length !== 1 ? 's' : ''}.
+                      </Text>
+                    )}
+                  </BlockStack>
+                </BlockStack>
+              </Card>
+            )}
           </FormLayout>
         </Modal.Section>
       </Modal>

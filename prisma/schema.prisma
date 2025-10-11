@@ -38,9 +38,9 @@ model Product {
   handle          String
   productType     String?
   vendor          String?
+  requireSerial   Boolean   @default(false)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
-  requireSerial   Boolean   @default(false)
   shop            String
   
   variants        ProductVariant[]
@@ -68,17 +68,18 @@ model ProductVariant {
 }
 
 model Serial {
-  id              String    @id @default(cuid())
-  serialNumber    String    @unique
+  id              String       @id @default(cuid())
+  serialNumber    String       @unique
   productId       String?
   variantId       String?
   orderId         String?
   status          SerialStatus @default(AVAILABLE)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  soldAt          DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
   shop            String
   
-  product         Product?  @relation(fields: [productId], references: [id])
+  product         Product?     @relation(fields: [productId], references: [id])
   variant         ProductVariant? @relation(fields: [variantId], references: [id])
   
   @@map("serials")
@@ -86,6 +87,7 @@ model Serial {
 
 enum SerialStatus {
   AVAILABLE
+  RESERVED
   SOLD
   RETURNED
   DELETED
