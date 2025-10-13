@@ -222,6 +222,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { success: true, message: `Successfully assigned ${serialIds.length} serial numbers and enabled requirement` };
     }
 
+    if (intent === "enableOnly") {
+      const variantId = formData.get("variantId") as string;
+      const productId = formData.get("productId") as string;
+
+      // Enable the requirement without assigning serials
+      await updateVariantSerialRequirement({
+        id: variantId,
+        requireSerial: true,
+      });
+
+      // Update product requirement since at least one variant now requires serials
+      await updateProductSerialRequirement({
+        id: productId,
+        requireSerial: true
+      });
+
+      return { success: true, message: "Successfully enabled serial requirement" };
+    }
+
     return { success: false, message: "Unknown action" };
   } catch (error) {
     console.error("Action error:", error);
@@ -680,7 +699,7 @@ export default function Products() {
         onClose={handleCloseAssignmentModal}
         title={`Enable Serial Requirement for ${selectedVariant?.productTitle} - ${selectedVariant?.title}`}
         primaryAction={{
-          content: selectedSerial ? 'Assign Serial & Enable' : 'Select Serial to Enable',
+          content: selectedSerial ? 'Select & Assign' : 'Select & Assign',
           onAction: handleSubmitAssignment,
           disabled: !selectedSerial || isLoading,
           loading: isLoading,
@@ -689,6 +708,24 @@ export default function Products() {
           {
             content: 'Cancel',
             onAction: handleCloseAssignmentModal,
+          },
+          {
+            content: 'Enable Only',
+            onAction: () => {
+              if (!selectedVariant) return;
+              
+              fetcher.submit(
+                {
+                  intent: 'enableOnly',
+                  variantId: selectedVariant.id,
+                  productId: selectedVariant.productId,
+                },
+                { method: 'post' }
+              );
+              
+              handleCloseAssignmentModal();
+            },
+            disabled: isLoading,
           },
         ]}
       >
