@@ -257,21 +257,25 @@ export default function Products() {
   const [assignmentModalActive, setAssignmentModalActive] = useState(false);
   const [selectedVariant, setSelectedVariant] = useState<{id: string, productId: string, title: string, productTitle: string} | null>(null);
   const [selectedSerial, setSelectedSerial] = useState<string>('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState('25');
 
   const isLoading = fetcher.state === "submitting" || fetcher.state === "loading";
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchValue(value);
+    setCurrentPage(1); // Reset to first page when searching
   }, []);
 
   const handleProductTypeFilterChange = useCallback((value: string) => {
     setProductTypeFilter(value);
-    
+    setCurrentPage(1); // Reset to first page when filtering
+
     // If changing product type, check if current vendor is still valid
     if (value !== 'All') {
       const productsOfType = products.filter(p => p.productType === value);
       const availableVendors = Array.from(new Set(productsOfType.map(p => p.vendor).filter(Boolean)));
-      
+
       if (vendorFilter !== 'All' && !availableVendors.includes(vendorFilter)) {
         setVendorFilter('All'); // Reset vendor if it's not available for this product type
       }
@@ -280,17 +284,31 @@ export default function Products() {
 
   const handleVendorFilterChange = useCallback((value: string) => {
     setVendorFilter(value);
-    
+    setCurrentPage(1); // Reset to first page when filtering
+
     // If changing vendor, check if current product type is still valid
     if (value !== 'All') {
       const productsOfVendor = products.filter(p => p.vendor === value);
       const availableTypes = Array.from(new Set(productsOfVendor.map(p => p.productType).filter(Boolean)));
-      
+
       if (productTypeFilter !== 'All' && !availableTypes.includes(productTypeFilter)) {
         setProductTypeFilter('All'); // Reset product type if it's not available for this vendor
       }
     }
   }, [products, productTypeFilter]);
+
+  const handlePreviousPage = useCallback(() => {
+    setCurrentPage(prev => Math.max(1, prev - 1));
+  }, []);
+
+  const handleNextPage = useCallback(() => {
+    setCurrentPage(prev => prev + 1);
+  }, []);
+
+  const handleItemsPerPageChange = useCallback((value: string) => {
+    setItemsPerPage(value);
+    setCurrentPage(1); // Reset to first page when changing items per page
+  }, []);
 
   const handleToggleSerial = useCallback((variant: any, product: any, currentValue: boolean) => {
     if (!currentValue) {
@@ -463,60 +481,71 @@ export default function Products() {
     </div>
   );
 
-  // Generate rows from filtered product data
-  const rows = filteredProducts.flatMap((product) =>
-    product.variants.map((variant) => {
-      const variantWithSerial = variant as typeof variant & { 
-        _count?: { serials: number };
-        assignedSerial?: { serialNumber: string; status: string } | null;
-      };
-      
-      return [
-        product.title,
-        variant.title || 'Default Variant',
-        variant.sku || '-',
-        variantWithSerial.assignedSerial?.serialNumber || '-',
-        variantWithSerial.assignedSerial ? (
-          <Badge 
-            key={`status-${variant.id}`}
-            tone={variantWithSerial.assignedSerial.status === 'RESERVED' ? 'warning' : 'info'}
-          >
-            {variantWithSerial.assignedSerial.status}
-          </Badge>
-        ) : '-',
-        <Toggle
-          key={`toggle-${variant.id}`}
-          checked={variant.requireSerial}
-          onChange={() => handleToggleSerial(variant, product, variant.requireSerial)}
-          disabled={isLoading}
-        />,
-        <InlineStack key={`actions-${variant.id}`} gap="200">
-          {variant.requireSerial && !variantWithSerial.assignedSerial && (
-            <Button 
-              size="micro" 
-              variant="plain" 
-              onClick={() => handleAssignSerials(variant, product)}
-              disabled={unassignedSerials.length === 0 || isLoading}
-              loading={isLoading}
-            >
-              📎 Assign
-            </Button>
-          )}
-          <Button size="micro" variant="plain" onClick={() => console.log('Edit', variant.id)}>
-            ✏️
-          </Button>
+  // Calculate pagination for product variants (flatten products to variants first)
+  const allVariants = filteredProducts.flatMap((product) =>
+    product.variants.map((variant) => ({ product, variant }))
+  );
+
+  const itemsPerPageNum = parseInt(itemsPerPage, 10);
+  const totalItems = allVariants.length;
+  const totalPages = Math.ceil(totalItems / itemsPerPageNum);
+  const startIndex = (currentPage - 1) * itemsPerPageNum;
+  const endIndex = startIndex + itemsPerPageNum;
+  const paginatedVariants = allVariants.slice(startIndex, endIndex);
+
+  // Generate rows from paginated variant data
+  const rows = paginatedVariants.map(({ product, variant }) => {
+    const variantWithSerial = variant as typeof variant & {
+      _count?: { serials: number };
+      assignedSerial?: { serialNumber: string; status: string } | null;
+    };
+
+    return [
+      product.title,
+      variant.title || 'Default Variant',
+      variant.sku || '-',
+      variantWithSerial.assignedSerial?.serialNumber || '-',
+      variantWithSerial.assignedSerial ? (
+        <Badge
+          key={`status-${variant.id}`}
+          tone={variantWithSerial.assignedSerial.status === 'RESERVED' ? 'warning' : 'info'}
+        >
+          {variantWithSerial.assignedSerial.status}
+        </Badge>
+      ) : '-',
+      <Toggle
+        key={`toggle-${variant.id}`}
+        checked={variant.requireSerial}
+        onChange={() => handleToggleSerial(variant, product, variant.requireSerial)}
+        disabled={isLoading}
+      />,
+      <InlineStack key={`actions-${variant.id}`} gap="200">
+        {variant.requireSerial && !variantWithSerial.assignedSerial && (
           <Button
             size="micro"
             variant="plain"
-            tone="critical"
-            onClick={() => console.log('Delete', variant.id)}
+            onClick={() => handleAssignSerials(variant, product)}
+            disabled={unassignedSerials.length === 0 || isLoading}
+            loading={isLoading}
           >
-            🗑️
+            📎 Assign
           </Button>
-        </InlineStack>
-      ];
-    })
-  );
+        )}
+        <Button size="micro" variant="plain" onClick={() => console.log('Edit', variant.id)}>
+          ✏️
+        </Button>
+        <Button
+          size="micro"
+          variant="plain"
+          tone="critical"
+          onClick={() => console.log('Delete', variant.id)}
+        >
+          🗑️
+        </Button>
+      </InlineStack>
+    ];
+  });
+
 
   // Loading skeleton component
   const LoadingSkeleton = () => (
@@ -588,8 +617,8 @@ export default function Products() {
         <Card>
           <BlockStack gap="400">
             {/* Search and Filter Controls */}
-            <InlineStack gap="400" align="space-between">
-              <div style={{ flex: 1, maxWidth: '500px' }}>
+            <BlockStack gap="300">
+              <div style={{ width: '100%' }}>
                 <TextField
                   label="Search"
                   value={searchValue}
@@ -599,8 +628,8 @@ export default function Products() {
                   autoComplete="off"
                 />
               </div>
-              <InlineStack gap="200" align="end">
-                <div style={{ minWidth: '140px' }}>
+              <InlineStack gap="300" wrap>
+                <div style={{ flex: '1 1 150px', minWidth: '150px' }}>
                   <Select
                     label="Product type"
                     options={productTypeOptions}
@@ -608,7 +637,7 @@ export default function Products() {
                     onChange={handleProductTypeFilterChange}
                   />
                 </div>
-                <div style={{ minWidth: '140px' }}>
+                <div style={{ flex: '1 1 150px', minWidth: '150px' }}>
                   <Select
                     label="Vendor"
                     options={vendorOptions}
@@ -616,12 +645,8 @@ export default function Products() {
                     onChange={handleVendorFilterChange}
                   />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <Text as="p" variant="bodyMd" tone="subdued">Sort</Text>
-                  <Button>Sort</Button>
-                </div>
               </InlineStack>
-            </InlineStack>
+            </BlockStack>
 
             {/* Data Table or Empty State */}
             {products.length === 0 ? (
@@ -651,44 +676,63 @@ export default function Products() {
                 </InlineStack>
               </EmptyState>
             ) : (
-              <DataTable
-                columnContentTypes={[
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                ]}
-                headings={[
-                  'Product Name',
-                  'Variant Name',
-                  'SKU',
-                  'Assigned Serial',
-                  'Serial Status',
-                  'Require Serial',
-                  'Actions',
-                ]}
-                rows={rows}
-              />
+              <div style={{ overflowX: 'auto' }}>
+                <DataTable
+                  columnContentTypes={[
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                  ]}
+                  headings={[
+                    'Product Name',
+                    'Variant Name',
+                    'SKU',
+                    'Assigned Serial',
+                    'Serial Status',
+                    'Require Serial',
+                    'Actions',
+                  ]}
+                  rows={rows}
+                />
+              </div>
             )}
 
             {/* Pagination */}
-            <InlineStack align="space-between">
-              <Text as="p" variant="bodyMd" tone="subdued">
-                Showing {rows.length} of {products.flatMap(p => p.variants).length} total variants
-                {(searchValue || productTypeFilter !== 'All' || vendorFilter !== 'All') && 
-                  ` (filtered from ${products.length} products)`
-                }
-              </Text>
-              <Pagination
-                hasPrevious={false}
-                onPrevious={() => {}}
-                hasNext={false}
-                onNext={() => {}}
-              />
-            </InlineStack>
+            <BlockStack gap="300">
+              <InlineStack gap="300" align="space-between" blockAlign="center" wrap>
+                <Text as="p" variant="bodyMd" tone="subdued">
+                  Showing {totalItems > 0 ? startIndex + 1 : 0} to {Math.min(endIndex, totalItems)} of {totalItems} results
+                  {totalPages > 1 && ` (Page ${currentPage} of ${totalPages})`}
+                </Text>
+                <InlineStack gap="300" blockAlign="center">
+                  <div style={{ minWidth: '120px' }}>
+                    <Select
+                      label=""
+                      labelHidden
+                      options={[
+                        { label: '5 per page', value: '5' },
+                        { label: '10 per page', value: '10' },
+                        { label: '25 per page', value: '25' },
+                        { label: '50 per page', value: '50' },
+                        { label: '100 per page', value: '100' },
+                      ]}
+                      value={itemsPerPage}
+                      onChange={handleItemsPerPageChange}
+                    />
+                  </div>
+                  <Pagination
+                    hasPrevious={currentPage > 1}
+                    onPrevious={handlePreviousPage}
+                    hasNext={currentPage < totalPages}
+                    onNext={handleNextPage}
+                  />
+                </InlineStack>
+              </InlineStack>
+            </BlockStack>
           </BlockStack>
         </Card>
       </BlockStack>

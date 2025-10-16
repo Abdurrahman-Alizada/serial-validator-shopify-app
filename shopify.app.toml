@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "1fe9971d4c87626bcf8280cf64f35666"
+client_id = "35a995b255c826ca6b0e4bd3c1080de8"
 name = "serail-validator"
 application_url = "https://serial-validator-shopify-app-production.up.railway.app"
 embedded = true

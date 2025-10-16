@@ -3,6 +3,7 @@ import { Outlet, useLoaderData, useRouteError, useLocation, Link } from "react-r
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
+import { useState } from "react";
 
 import { authenticate } from "../shopify.server";
 
@@ -16,6 +17,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
   const location = useLocation();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Determine which tab is active based on current path
   const isDashboardActive = location.pathname === "/app";
@@ -25,19 +27,67 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <PolarisAppProvider i18n={{}}>
-        <div style={{ display: "flex", height: "100vh" }}>
+        <div style={{ display: "flex", height: "100vh", position: "relative" }}>
+          {/* Mobile Menu Button */}
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            style={{
+              position: "fixed",
+              top: "1rem",
+              left: "1rem",
+              zIndex: 1001,
+              display: "none",
+              padding: "0.5rem",
+              backgroundColor: "#fff",
+              border: "1px solid #e5e7eb",
+              borderRadius: "0.5rem",
+              cursor: "pointer",
+              boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)",
+            }}
+            className="mobile-menu-btn"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 12H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M3 6H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M3 18H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+
+          {/* Mobile Overlay */}
+          {mobileMenuOpen && (
+            <div
+              onClick={() => setMobileMenuOpen(false)}
+              style={{
+                position: "fixed",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "rgba(0, 0, 0, 0.5)",
+                zIndex: 999,
+                display: "none",
+              }}
+              className="mobile-overlay"
+            />
+          )}
+
           {/* Sidebar Navigation */}
-          <nav style={{
-            width: "240px",
-            backgroundColor: "#f9fafb",
-            borderRight: "1px solid #e5e7eb",
-            padding: "1.5rem 0"
-          }}>
+          <nav
+            style={{
+              width: "240px",
+              backgroundColor: "#f9fafb",
+              borderRight: "1px solid #e5e7eb",
+              padding: "1.5rem 0",
+              overflowY: "auto",
+            }}
+            className="sidebar-nav"
+            data-mobile-open={mobileMenuOpen}
+          >
 
 
             {/* Navigation Items */}
             <div style={{ padding: "0 1rem" }}>
-              <Link to="/app" style={{ textDecoration: "none" }}>
+              <Link to="/app" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -61,7 +111,7 @@ export default function App() {
                 </div>
               </Link>
 
-              <Link to="/app/products" style={{ textDecoration: "none" }}>
+              <Link to="/app/products" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -84,7 +134,7 @@ export default function App() {
                 </div>
               </Link>
 
-              <Link to="/app/assignment" style={{ textDecoration: "none" }}>
+              <Link to="/app/assignment" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -110,10 +160,52 @@ export default function App() {
           </nav>
 
           {/* Main Content Area */}
-          <main style={{ flex: 1, overflow: "auto" }}>
+          <main style={{ flex: 1, overflow: "auto", marginLeft: 0 }} className="main-content">
             <Outlet />
           </main>
         </div>
+
+        {/* Mobile Responsive Styles */}
+        <style>{`
+          /* Desktop styles */
+          @media (min-width: 769px) {
+            .sidebar-nav {
+              position: static !important;
+              width: 240px !important;
+              min-width: 240px !important;
+            }
+            .main-content {
+              margin-left: 0 !important;
+            }
+            .mobile-menu-btn {
+              display: none !important;
+            }
+            .mobile-overlay {
+              display: none !important;
+            }
+          }
+
+          /* Mobile styles */
+          @media (max-width: 768px) {
+            .sidebar-nav {
+              position: fixed !important;
+              top: 0 !important;
+              bottom: 0 !important;
+              left: -240px !important;
+              z-index: 1000 !important;
+              transition: left 0.3s ease !important;
+            }
+            .sidebar-nav[data-mobile-open="true"] {
+              left: 0 !important;
+            }
+            .mobile-menu-btn {
+              display: block !important;
+            }
+            .main-content {
+              margin-left: 0 !important;
+            }
+          }
+        `}</style>
       </PolarisAppProvider>
     </AppProvider>
   );

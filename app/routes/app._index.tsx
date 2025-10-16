@@ -26,7 +26,7 @@ import {
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useFetcher, useLoaderData } from "react-router";
-import prisma, { createSerial, getUnassignedSerials } from "../db.server";
+import prisma, { createSerial, getUnassignedSerials, updateSerial, deleteSerial } from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -132,6 +132,75 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
+  if (intent === "editSerial") {
+    const serialId = formData.get("serialId") as string;
+    const serialNumber = formData.get("serialNumber") as string;
+    const variantId = formData.get("variantId") as string;
+
+    if (!serialId || !serialNumber) {
+      return { success: false, message: "Serial ID and number are required" };
+    }
+
+    try {
+      // First verify this serial belongs to the current shop
+      const existingSerial = await prisma.serial.findFirst({
+        where: { id: serialId, shop: session.shop },
+      });
+
+      if (!existingSerial) {
+        return { success: false, message: "Serial number not found" };
+      }
+
+      // Get the product ID from the variant if provided
+      let productId = existingSerial.productId;
+      if (variantId && variantId !== existingSerial.variantId) {
+        const variant = await prisma.productVariant.findUnique({
+          where: { id: variantId },
+          select: { productId: true },
+        });
+        productId = variant?.productId || null;
+      }
+
+      await updateSerial({
+        id: serialId,
+        serialNumber,
+        productId: variantId ? productId : null,
+        variantId: variantId || null,
+      });
+
+      return { success: true, message: "Serial number updated successfully" };
+    } catch (error) {
+      console.error("Error updating serial:", error);
+      return { success: false, message: "Failed to update serial number" };
+    }
+  }
+
+  if (intent === "deleteSerial") {
+    const serialId = formData.get("serialId") as string;
+
+    if (!serialId) {
+      return { success: false, message: "Serial ID is required" };
+    }
+
+    try {
+      // First verify this serial belongs to the current shop
+      const existingSerial = await prisma.serial.findFirst({
+        where: { id: serialId, shop: session.shop },
+      });
+
+      if (!existingSerial) {
+        return { success: false, message: "Serial number not found" };
+      }
+
+      await deleteSerial(serialId);
+
+      return { success: true, message: "Serial number deleted successfully" };
+    } catch (error) {
+      console.error("Error deleting serial:", error);
+      return { success: false, message: "Failed to delete serial number" };
+    }
+  }
+
   return null;
 };
 
@@ -150,20 +219,49 @@ export default function Dashboard() {
   const [showCsvPreview, setShowCsvPreview] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState('25');
+  const [editModalActive, setEditModalActive] = useState(false);
+  const [deleteModalActive, setDeleteModalActive] = useState(false);
+  const [selectedSerialForEdit, setSelectedSerialForEdit] = useState<any>(null);
+  const [editSerialNumber, setEditSerialNumber] = useState('');
+  const [editSelectedVariant, setEditSelectedVariant] = useState('');
+  const [sortBy, setSortBy] = useState('updatedAt-desc');
 
   const fetcher = useFetcher();
   const isLoading = fetcher.state === "submitting" || fetcher.state === "loading";
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchValue(value);
+    setCurrentPage(1); // Reset to first page when searching
   }, []);
 
   const handleStatusFilterChange = useCallback((value: string) => {
     setStatusFilter(value);
+    setCurrentPage(1); // Reset to first page when filtering
   }, []);
 
   const handleProductFilterChange = useCallback((value: string) => {
     setProductFilter(value);
+    setCurrentPage(1); // Reset to first page when filtering
+  }, []);
+
+  const handlePreviousPage = useCallback(() => {
+    setCurrentPage(prev => Math.max(1, prev - 1));
+  }, []);
+
+  const handleNextPage = useCallback(() => {
+    setCurrentPage(prev => prev + 1);
+  }, []);
+
+  const handleItemsPerPageChange = useCallback((value: string) => {
+    setItemsPerPage(value);
+    setCurrentPage(1); // Reset to first page when changing items per page
+  }, []);
+
+  const handleSortChange = useCallback((value: string) => {
+    setSortBy(value);
+    setCurrentPage(1); // Reset to first page when sorting changes
   }, []);
 
   const handleModalToggle = useCallback(() => {
@@ -305,6 +403,64 @@ export default function Dashboard() {
     setEditValue('');
   }, [csvPreviewData]);
 
+  const handleEditModalToggle = useCallback((serial?: any) => {
+    if (serial) {
+      setSelectedSerialForEdit(serial);
+      setEditSerialNumber(serial.serialNumber);
+      setEditSelectedVariant(serial.variantId || '');
+    } else {
+      setSelectedSerialForEdit(null);
+      setEditSerialNumber('');
+      setEditSelectedVariant('');
+    }
+    setEditModalActive(!editModalActive);
+  }, [editModalActive]);
+
+  const handleDeleteModalToggle = useCallback((serial?: any) => {
+    if (serial) {
+      setSelectedSerialForEdit(serial);
+    } else {
+      setSelectedSerialForEdit(null);
+    }
+    setDeleteModalActive(!deleteModalActive);
+  }, [deleteModalActive]);
+
+  const handleEditSubmit = useCallback(() => {
+    if (!selectedSerialForEdit || !editSerialNumber.trim()) return;
+
+    const selectedVariantData = variants?.find(v => v.id === editSelectedVariant);
+    const productId = selectedVariantData?.productId;
+
+    fetcher.submit(
+      {
+        intent: 'editSerial',
+        serialId: selectedSerialForEdit.id,
+        serialNumber: editSerialNumber,
+        variantId: editSelectedVariant,
+        productId: productId || '',
+      },
+      { method: 'post' }
+    );
+    setEditModalActive(false);
+    setSelectedSerialForEdit(null);
+    setEditSerialNumber('');
+    setEditSelectedVariant('');
+  }, [fetcher, selectedSerialForEdit, editSerialNumber, editSelectedVariant, variants]);
+
+  const handleDeleteSubmit = useCallback(() => {
+    if (!selectedSerialForEdit) return;
+
+    fetcher.submit(
+      {
+        intent: 'deleteSerial',
+        serialId: selectedSerialForEdit.id,
+      },
+      { method: 'post' }
+    );
+    setDeleteModalActive(false);
+    setSelectedSerialForEdit(null);
+  }, [fetcher, selectedSerialForEdit]);
+
   const handleBulkImport = useCallback(() => {
     if (csvPreviewData.length === 0) return;
 
@@ -340,11 +496,18 @@ export default function Dashboard() {
     });
   }, []);
 
-  const handleSelectAll = useCallback((checked: boolean) => {
+  const handleSelectAll = useCallback((checked: boolean, paginatedSerials: typeof serials) => {
     if (checked) {
-      setSelectedSerials(filteredSerials.map(serial => serial.id));
+      // Select all serials on current page
+      const currentPageIds = paginatedSerials.map(serial => serial.id);
+      setSelectedSerials(prev => {
+        const newSelection = new Set([...prev, ...currentPageIds]);
+        return Array.from(newSelection);
+      });
     } else {
-      setSelectedSerials([]);
+      // Deselect all serials on current page
+      const currentPageIds = new Set(paginatedSerials.map(serial => serial.id));
+      setSelectedSerials(prev => prev.filter(id => !currentPageIds.has(id)));
     }
   }, []);
 
@@ -373,6 +536,17 @@ export default function Dashboard() {
     })),
   ];
 
+  const sortOptions = [
+    { label: 'Newest First', value: 'updatedAt-desc' },
+    { label: 'Oldest First', value: 'updatedAt-asc' },
+    { label: 'Serial A-Z', value: 'serialNumber-asc' },
+    { label: 'Serial Z-A', value: 'serialNumber-desc' },
+    { label: 'Product A-Z', value: 'product-asc' },
+    { label: 'Product Z-A', value: 'product-desc' },
+    { label: 'Status A-Z', value: 'status-asc' },
+    { label: 'Status Z-A', value: 'status-desc' },
+  ];
+
   // Filter serials based on search, status, and product
   const filteredSerials = serials.filter(serial => {
     const matchesSearch = !searchValue ||
@@ -384,6 +558,34 @@ export default function Dashboard() {
     const matchesProduct = productFilter === 'All' || serial.productId === productFilter;
 
     return matchesSearch && matchesStatus && matchesProduct;
+  });
+
+  // Sort serials based on selected sort option
+  const sortedSerials = [...filteredSerials].sort((a, b) => {
+    const [field, direction] = sortBy.split('-') as [string, 'asc' | 'desc'];
+
+    let compareValue = 0;
+
+    switch (field) {
+      case 'serialNumber':
+        compareValue = a.serialNumber.localeCompare(b.serialNumber);
+        break;
+      case 'product':
+        const productA = a.product?.title || '';
+        const productB = b.product?.title || '';
+        compareValue = productA.localeCompare(productB);
+        break;
+      case 'status':
+        compareValue = a.status.localeCompare(b.status);
+        break;
+      case 'updatedAt':
+        compareValue = new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+        break;
+      default:
+        compareValue = 0;
+    }
+
+    return direction === 'desc' ? -compareValue : compareValue;
   });
 
   // Helper function to get badge tone based on status
@@ -402,8 +604,16 @@ export default function Dashboard() {
     }
   };
 
-  // Generate rows from real data
-  const rows = filteredSerials.map((serial) => [
+  // Calculate pagination
+  const itemsPerPageNum = parseInt(itemsPerPage, 10);
+  const totalItems = sortedSerials.length;
+  const totalPages = Math.ceil(totalItems / itemsPerPageNum);
+  const startIndex = (currentPage - 1) * itemsPerPageNum;
+  const endIndex = startIndex + itemsPerPageNum;
+  const paginatedSerials = sortedSerials.slice(startIndex, endIndex);
+
+  // Generate rows from paginated data
+  const rows = paginatedSerials.map((serial) => [
     <Checkbox
       key={`checkbox-${serial.id}`}
       label=""
@@ -425,8 +635,8 @@ export default function Dashboard() {
       minute: '2-digit',
     }),
     <InlineStack key={`actions-${serial.id}`} gap="200">
-      <Button size="micro" variant="plain" onClick={() => console.log('Edit', serial.id)}>✏️</Button>
-      <Button size="micro" variant="plain" tone="critical" onClick={() => console.log('Delete', serial.id)}>🗑️</Button>
+      <Button size="micro" variant="plain" onClick={() => handleEditModalToggle(serial)}>✏️</Button>
+      <Button size="micro" variant="plain" tone="critical" onClick={() => handleDeleteModalToggle(serial)}>🗑️</Button>
     </InlineStack>
   ]);
 
@@ -488,9 +698,11 @@ export default function Dashboard() {
         {/* Serial Management Section */}
         <Card>
           <BlockStack gap="400">
-            <InlineStack align="space-between">
-              <Text as="h2" variant="headingLg">Serial Management</Text>
-              <InlineStack gap="300">
+            <BlockStack gap="300">
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="h2" variant="headingLg">Serial Management</Text>
+              </InlineStack>
+              <InlineStack gap="300" wrap>
                 <Button
                   variant="primary"
                   onClick={handleModalToggle}
@@ -503,7 +715,7 @@ export default function Dashboard() {
                   onClick={handleBulkImportToggle}
                   disabled={isLoading}
                 >
-                  Bulk Import (Unassigned)
+                  Bulk Import
                 </Button>
                 <Button
                   onClick={() => window.open(`/api/export-serials?format=csv`, '_blank')}
@@ -512,11 +724,11 @@ export default function Dashboard() {
                   Export CSV
                 </Button>
               </InlineStack>
-            </InlineStack>
+            </BlockStack>
 
             {/* Search and Filter */}
-            <InlineStack gap="400" align="space-between">
-              <div style={{ flexGrow: 1, maxWidth: '350px' }}>
+            <BlockStack gap="300">
+              <div style={{ width: '100%' }}>
                 <TextField
                   label="Search"
                   value={searchValue}
@@ -526,23 +738,33 @@ export default function Dashboard() {
                   autoComplete="off"
                 />
               </div>
-              <div style={{ minWidth: '150px' }}>
-                <Select
-                  label="Product"
-                  options={productFilterOptions}
-                  value={productFilter}
-                  onChange={handleProductFilterChange}
-                />
-              </div>
-              <div style={{ minWidth: '150px' }}>
-                <Select
-                  label="Status"
-                  options={statusOptions}
-                  value={statusFilter}
-                  onChange={handleStatusFilterChange}
-                />
-              </div>
-            </InlineStack>
+              <InlineStack gap="300" wrap>
+                <div style={{ flex: '1 1 150px', minWidth: '150px' }}>
+                  <Select
+                    label="Product"
+                    options={productFilterOptions}
+                    value={productFilter}
+                    onChange={handleProductFilterChange}
+                  />
+                </div>
+                <div style={{ flex: '1 1 150px', minWidth: '150px' }}>
+                  <Select
+                    label="Status"
+                    options={statusOptions}
+                    value={statusFilter}
+                    onChange={handleStatusFilterChange}
+                  />
+                </div>
+                <div style={{ flex: '1 1 150px', minWidth: '150px' }}>
+                  <Select
+                    label="Sort by"
+                    options={sortOptions}
+                    value={sortBy}
+                    onChange={handleSortChange}
+                  />
+                </div>
+              </InlineStack>
+            </BlockStack>
 
             {/* Data Table or Empty State */}
             {filteredSerials.length === 0 ? (
@@ -568,48 +790,70 @@ export default function Dashboard() {
                 )}
               </EmptyState>
             ) : (
-              <DataTable
-                columnContentTypes={[
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                  'text',
-                ]}
-                headings={[
-                  <Checkbox
-                    key="select-all"
-                    label=""
-                    checked={selectedSerials.length === filteredSerials.length && filteredSerials.length > 0}
-                    onChange={handleSelectAll}
-                  />,
-                  'Serial Number',
-                  'Product Name',
-                  'Variant',
-                  'Status',
-                  'Order ID',
-                  'Last Updated',
-                  'Actions',
-                ]}
-                rows={rows}
-              />
+              <div style={{ overflowX: 'auto' }}>
+                <DataTable
+                  columnContentTypes={[
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                    'text',
+                  ]}
+                  headings={[
+                    <Checkbox
+                      key="select-all"
+                      label=""
+                      checked={paginatedSerials.length > 0 && paginatedSerials.every(serial => selectedSerials.includes(serial.id))}
+                      onChange={(checked) => handleSelectAll(checked, paginatedSerials)}
+                    />,
+                    'Serial Number',
+                    'Product Name',
+                    'Variant',
+                    'Status',
+                    'Order ID',
+                    'Last Updated',
+                    'Actions',
+                  ]}
+                  rows={rows}
+                />
+              </div>
             )}
 
             {/* Pagination */}
-            <InlineStack align="space-between">
-              <Text as="p" variant="bodyMd" tone="subdued">
-                Showing {filteredSerials.length > 0 ? '1' : '0'} to {filteredSerials.length} of {filteredSerials.length} results
-              </Text>
-              <Pagination
-                hasPrevious={false}
-                onPrevious={() => {}}
-                hasNext={false}
-                onNext={() => {}}
-              />
-            </InlineStack>
+            <BlockStack gap="300">
+              <InlineStack gap="300" align="space-between" blockAlign="center" wrap>
+                <Text as="p" variant="bodyMd" tone="subdued">
+                  Showing {totalItems > 0 ? startIndex + 1 : 0} to {Math.min(endIndex, totalItems)} of {totalItems} results
+                  {totalPages > 1 && ` (Page ${currentPage} of ${totalPages})`}
+                </Text>
+                <InlineStack gap="300" blockAlign="center">
+                  <div style={{ minWidth: '120px' }}>
+                    <Select
+                      label=""
+                      labelHidden
+                      options={[
+                        { label: '5 per page', value: '5' },
+                        { label: '10 per page', value: '10' },
+                        { label: '25 per page', value: '25' },
+                        { label: '50 per page', value: '50' },
+                        { label: '100 per page', value: '100' },
+                      ]}
+                      value={itemsPerPage}
+                      onChange={handleItemsPerPageChange}
+                    />
+                  </div>
+                  <Pagination
+                    hasPrevious={currentPage > 1}
+                    onPrevious={handlePreviousPage}
+                    hasNext={currentPage < totalPages}
+                    onNext={handleNextPage}
+                  />
+                </InlineStack>
+              </InlineStack>
+            </BlockStack>
           </BlockStack>
         </Card>
       </BlockStack>
@@ -853,6 +1097,98 @@ export default function Dashboard() {
               </Card>
             )}
           </FormLayout>
+        </Modal.Section>
+      </Modal>
+
+      {/* Edit Serial Modal */}
+      <Modal
+        open={editModalActive}
+        onClose={() => handleEditModalToggle()}
+        title="Edit Serial Number"
+        primaryAction={{
+          content: 'Save Changes',
+          onAction: handleEditSubmit,
+          disabled: !editSerialNumber.trim() || isLoading,
+          loading: isLoading,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: () => handleEditModalToggle(),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <FormLayout>
+            <TextField
+              label="Serial Number"
+              value={editSerialNumber}
+              onChange={setEditSerialNumber}
+              placeholder="Enter serial number"
+              autoComplete="off"
+              helpText="Enter a unique serial number for tracking"
+            />
+
+            <Select
+              label="Product Variant (Optional)"
+              options={variantOptions}
+              value={editSelectedVariant}
+              onChange={setEditSelectedVariant}
+              placeholder="Select a product variant (optional)"
+              helpText="Leave empty to create unassigned serial numbers"
+            />
+          </FormLayout>
+        </Modal.Section>
+      </Modal>
+
+      {/* Delete Serial Modal */}
+      <Modal
+        open={deleteModalActive}
+        onClose={() => handleDeleteModalToggle()}
+        title="Delete Serial Number"
+        primaryAction={{
+          content: 'Delete',
+          onAction: handleDeleteSubmit,
+          destructive: true,
+          disabled: isLoading,
+          loading: isLoading,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: () => handleDeleteModalToggle(),
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <Text as="p" variant="bodyMd">
+              Are you sure you want to delete this serial number?
+            </Text>
+            {selectedSerialForEdit && (
+              <Card>
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodyMd">
+                    <strong>Serial Number:</strong> {selectedSerialForEdit.serialNumber}
+                  </Text>
+                  <Text as="p" variant="bodyMd">
+                    <strong>Product:</strong> {selectedSerialForEdit.product?.title || 'N/A'}
+                  </Text>
+                  <Text as="p" variant="bodyMd">
+                    <strong>Variant:</strong> {selectedSerialForEdit.variant?.title || 'N/A'}
+                  </Text>
+                  <Text as="p" variant="bodyMd">
+                    <strong>Status:</strong> <Badge tone={getBadgeTone(selectedSerialForEdit.status)}>
+                      {selectedSerialForEdit.status}
+                    </Badge>
+                  </Text>
+                </BlockStack>
+              </Card>
+            )}
+            <Text as="p" variant="bodySm" tone="critical">
+              This action cannot be undone.
+            </Text>
+          </BlockStack>
         </Modal.Section>
       </Modal>
     </Page>

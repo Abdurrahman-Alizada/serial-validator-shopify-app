@@ -91,6 +91,33 @@ export async function updateSerialStatus({
   });
 }
 
+export async function updateSerial({
+  id,
+  serialNumber,
+  productId,
+  variantId,
+}: {
+  id: string;
+  serialNumber?: string;
+  productId?: string | null;
+  variantId?: string | null;
+}) {
+  return await prisma.serial.update({
+    where: { id },
+    data: {
+      ...(serialNumber !== undefined && { serialNumber }),
+      ...(productId !== undefined && { productId }),
+      ...(variantId !== undefined && { variantId }),
+    },
+  });
+}
+
+export async function deleteSerial(id: string) {
+  return await prisma.serial.delete({
+    where: { id },
+  });
+}
+
 export async function assignSerialsToVariant({
   serialIds,
   productId,
