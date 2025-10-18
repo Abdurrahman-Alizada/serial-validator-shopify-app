@@ -8,23 +8,20 @@ export default async () => {
 function Extension() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  const API_BASE_URL = 'https://traveling-enb-yacht-rider.trycloudflare.com';
 
   useEffect(() => {
+    const API_BASE_URL = 'https://traveling-enb-yacht-rider.trycloudflare.com';
+
     fetch(`${API_BASE_URL}/api/products`)
       .then(res => res.json())
       .then(data => {
-        if (data.success) {
-          setProducts(data.data || []);
-        } else {
-          setError(data.message);
+        if (data.success && data.data) {
+          setProducts(data.data);
         }
         setLoading(false);
       })
-      .catch(err => {
-        setError(err.message);
+      .catch(error => {
+        console.error('Fetch error:', error);
         setLoading(false);
       });
   }, []);
@@ -36,20 +33,19 @@ function Extension() {
           <s-stack direction="block" gap="base">
             <s-text>Welcome to the preact action extension</s-text>
 
+            <s-section heading="Current Product">
+              <s-text type="strong">Product ID: {shopify.product.id}</s-text>
+              <s-text type="strong">Variant ID: {shopify.product.variantId}</s-text>
+            </s-section>
+
             <s-section heading="Products">
-              {loading && <s-text>Loading products...</s-text>}
+              {loading && <s-text>Loading...</s-text>}
 
-              {error && (
-                <s-banner tone="critical">
-                  Error: {error}
-                </s-banner>
-              )}
-
-              {!loading && !error && products.length === 0 && (
+              {!loading && products.length === 0 && (
                 <s-text>No products found</s-text>
               )}
 
-              {!loading && !error && products.length > 0 && (
+              {!loading && products.length > 0 && (
                 <s-stack direction="block" gap="small">
                   {products.map((p) => (
                     <s-stack key={p.id} direction="block" gap="small">
