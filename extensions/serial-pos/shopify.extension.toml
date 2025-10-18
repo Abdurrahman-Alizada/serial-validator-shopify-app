@@ -5,7 +5,7 @@ type = "ui_extension"
 name = "serial-pos"
 uid = "84b22301-eee0-efe8-b081-8a9efffab0267e368fa9"
 handle = "serial-pos"
-description = "A preact POS UI extension"
+description = "Serial validator extension"
 
 # module: path to the file that contains your extension’s source code
 # target: string that describes where your extension appears in POS
