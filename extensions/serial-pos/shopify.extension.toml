@@ -1,0 +1,21 @@
+api_version = "2025-10"
+
+[[extensions]]
+type = "ui_extension"
+name = "serial-pos"
+uid = "84b22301-eee0-efe8-b081-8a9efffab0267e368fa9"
+handle = "serial-pos"
+description = "Serial validator extension"
+
+# module: path to the file that contains your extension’s source code
+# target: string that describes where your extension appears in POS
+[[extensions.targeting]]
+module = "./src/Action.jsx"
+target = "pos.product-details.action.render"
+
+# You can omit the menu-item target and POS will provide a default menu item for this extension.
+# The menu item will present the action target on click.
+# This template has the same behavior as the POS-provided default, but is included for completeness.
+[[extensions.targeting]]
+module = "./src/MenuItem.jsx"
+target = "pos.product-details.action.menu-item.render"
