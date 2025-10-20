@@ -1,7 +1,6 @@
 import {render} from 'preact';
 import {useState, useEffect} from 'preact/hooks';
-
-const API_BASE_URL = 'https://traveling-enb-yacht-rider.trycloudflare.com';
+import {API_BASE_URL} from './config';
 
 export default async () => {
   render(<Extension />, document.body);
@@ -113,7 +112,7 @@ function Extension() {
       <s-page heading='Serial Assignment'>
         <s-scroll-box>
           <s-box padding="small">
-            <s-text>No product data found</s-text>
+            <s-text>No product data found...</s-text>
           </s-box>
         </s-scroll-box>
       </s-page>

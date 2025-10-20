@@ -19,3 +19,13 @@ target = "pos.product-details.action.render"
 [[extensions.targeting]]
 module = "./src/MenuItem.jsx"
 target = "pos.product-details.action.menu-item.render"
+
+# Smart grid tile to check cart serial requirements
+[[extensions.targeting]]
+module = "./src/CartLineItem.jsx"
+target = "pos.home.tile.render"
+
+# Modal that opens from the cart serial check tile
+[[extensions.targeting]]
+module = "./src/CartModal.jsx"
+target = "pos.home.modal.render"
