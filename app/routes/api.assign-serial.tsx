@@ -1,10 +1,33 @@
-import type { ActionFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
 import prisma from "../db.server";
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders,
+    });
+  }
+  return data({ error: "Method not allowed" }, { status: 405 });
+};
+
 export const action = async ({ request }: ActionFunctionArgs) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders,
+    });
+  }
+
   if (request.method !== "POST") {
-    return data({ error: "Method not allowed" }, { status: 405 });
+    return data({ error: "Method not allowed" }, { status: 405, headers: corsHeaders });
   }
 
   try {
@@ -68,21 +91,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         productTitle: result.product?.title || 'Unknown Product',
         variantTitle: result.variant?.title || 'Default Variant'
       }
-    });
+    }, { headers: corsHeaders });
 
   } catch (error) {
     console.error("Error assigning serial:", error);
-    
+
     if (error instanceof Error) {
-      return data({ 
-        success: false, 
-        message: error.message 
-      }, { status: 400 });
+      return data({
+        success: false,
+        message: error.message
+      }, { status: 400, headers: corsHeaders });
     }
 
-    return data({ 
-      success: false, 
-      message: "Internal server error" 
-    }, { status: 500 });
+    return data({
+      success: false,
+      message: "Internal server error"
+    }, { status: 500, headers: corsHeaders });
   }
 };
