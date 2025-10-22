@@ -294,9 +294,6 @@ function CartModal() {
                     {/* Serial Required Badge and Assign Button */}
                     {product && requiresSerial && !variant?.assignedSerial && (
                       <s-stack direction="block" gap="small">
-                        <s-badge tone="critical">
-                          <s-text type="small">Serial Required</s-text>
-                        </s-badge>
                         <s-button
                           variant="secondary"
                           onClick={() => {
@@ -304,7 +301,7 @@ function CartModal() {
                             setShowAssignment(true);
                           }}
                         >
-                          Assign Serial
+                         🏷️
                         </s-button>
                       </s-stack>
                     )}
