@@ -11,6 +11,7 @@ function CartModal() {
   const [productDetails, setProductDetails] = useState({});
   const [unassignedSerials, setUnassignedSerials] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchingProductDetails, setFetchingProductDetails] = useState(false);
   const [fetchingSerials, setFetchingSerials] = useState(false);
   const [showAssignment, setShowAssignment] = useState(false);
   const [selectedVariantId, setSelectedVariantId] = useState(null);
@@ -37,6 +38,8 @@ function CartModal() {
       if (newProductIds.length === 0) {
         return; // All products already fetched
       }
+
+      setFetchingProductDetails(true);
 
       try {
         // Fetch only new products
@@ -85,6 +88,8 @@ function CartModal() {
         }
       } catch (err) {
         console.error("Error fetching product details:", err);
+      } finally {
+        setFetchingProductDetails(false);
       }
     },
     [unassignedSerials.length],
@@ -265,11 +270,11 @@ function CartModal() {
             const requiresSerial = variant?.requireSerial || false;
 
             // Get product image - try line.image first, then product image
-            const productImage = line.image || product?.image || null;
+            // const productImage = line.image || product?.image || null;
 
             return (
               <s-box key={line.uuid || index} padding="base">
-                <s-stack direction="inline" gap="base" alignItems="flex-start">
+                <s-stack direction="inline" gap="base" alignItems="start">
                   {/* Product Details */}
                   <s-stack direction="block" gap="small">
                     <s-stack
@@ -291,9 +296,16 @@ function CartModal() {
                       <s-text type="generic">Qty: {quantity}</s-text>
                     )}
 
+                    {/* Loading state while fetching product details */}
+                    {!product && fetchingProductDetails && (
+                      <s-stack direction="block" gap="small">
+                        <s-text type="small">Checking serial requirements...</s-text>
+                      </s-stack>
+                    )}
+
                     {/* Serial Required Badge and Assign Button */}
                     {product && requiresSerial && !variant?.assignedSerial && (
-                      <s-stack direction="block" gap="small">
+                      <s-stack direction="inline" gap="small" alignItems="center">
                         <s-button
                           variant="secondary"
                           onClick={() => {
@@ -301,7 +313,7 @@ function CartModal() {
                             setShowAssignment(true);
                           }}
                         >
-                         🏷️
+                          Assign
                         </s-button>
                       </s-stack>
                     )}
