@@ -1,8 +1,8 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError, useLocation, Link } from "react-router";
+import { Outlet, useLoaderData, useRouteError, useLocation, Link, useNavigation } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
-import { AppProvider as PolarisAppProvider } from "@shopify/polaris";
+import { AppProvider as PolarisAppProvider, Spinner } from "@shopify/polaris";
 import { useState } from "react";
 
 import { authenticate } from "../shopify.server";
@@ -17,12 +17,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
   const location = useLocation();
+  const navigation = useNavigation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Determine which tab is active based on current path
   const isDashboardActive = location.pathname === "/app";
   const isProductsActive = location.pathname === "/app/products" || location.pathname.startsWith("/app/products/");
   const isAssignmentActive = location.pathname === "/app/assignment" || location.pathname.startsWith("/app/assignment/");
+
+  // Check if navigation is in progress
+  const isNavigating = navigation.state === "loading";
 
   return (
     <AppProvider embedded apiKey={apiKey}>
@@ -57,6 +61,13 @@ export default function App() {
           {mobileMenuOpen && (
             <div
               onClick={() => setMobileMenuOpen(false)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  setMobileMenuOpen(false);
+                }
+              }}
               style={{
                 position: "fixed",
                 top: 0,
@@ -87,7 +98,7 @@ export default function App() {
 
             {/* Navigation Items */}
             <div style={{ padding: "0 1rem" }}>
-              <Link to="/app" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
+              <Link to="/app" prefetch="intent" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -111,7 +122,7 @@ export default function App() {
                 </div>
               </Link>
 
-              <Link to="/app/products" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
+              <Link to="/app/products" prefetch="intent" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -134,7 +145,7 @@ export default function App() {
                 </div>
               </Link>
 
-              <Link to="/app/assignment" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
+              <Link to="/app/assignment" prefetch="intent" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
                 <div style={{
                   display: "flex",
                   alignItems: "center",
@@ -160,7 +171,23 @@ export default function App() {
           </nav>
 
           {/* Main Content Area */}
-          <main style={{ flex: 1, overflow: "auto", marginLeft: 0 }} className="main-content">
+          <main style={{ flex: 1, overflow: "auto", marginLeft: 0, position: "relative" }} className="main-content">
+            {isNavigating && (
+              <div style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: "rgba(255, 255, 255, 0.8)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                zIndex: 1000,
+              }}>
+                <Spinner size="large" />
+              </div>
+            )}
             <Outlet />
           </main>
         </div>
