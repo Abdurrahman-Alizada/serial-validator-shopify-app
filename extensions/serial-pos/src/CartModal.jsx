@@ -23,6 +23,9 @@ function CartModal() {
   const fetchedSerials = useRef(false); // Track if serials have been fetched
   const previousCartKeys = useRef(new Set()); // Track previous cart items for cleanup
 
+  // View state - 'cart' or 'serial-assignment'
+  const [currentView, setCurrentView] = useState('cart');
+
   // Generate a stable key for tracking line items based on product, variant, and line item UUID
   // This ensures assignments persist even when quantity changes
   const getStableKey = useCallback((line) => {
@@ -366,11 +369,12 @@ function CartModal() {
             timestamp: Date.now()
           });
 
-          // Wait 1 second before closing
+          // Wait 1 second before closing and returning to cart view
           setTimeout(() => {
             setSelectedLineItem(null);
             setSelectedSerialIds([]);
             setShowAssignment(false);
+            setCurrentView('cart');
           }, 1000);
 
           // Reload unassigned serials
@@ -385,6 +389,112 @@ function CartModal() {
         setAssigning(false);
       });
   }, [selectedLineItem, selectedSerialIds, productDetails, reloadUnassignedSerials, getStableKey, unassignedSerials, assignedSerials, assignedSerialDetails]);
+
+  // Show Serial Assignment screen
+  if (currentView === 'serial-assignment' && selectedLineItem) {
+    const lineItemId = selectedLineItem.uuid || selectedLineItem.id;
+    const alreadyAssignedCount = assignedSerials[lineItemId]?.length || 0;
+    const totalNeeded = selectedLineItem.quantity || 1;
+    const stillNeeded = totalNeeded - alreadyAssignedCount;
+
+    return (
+      <s-page heading="Serial Assignment">
+        <s-scroll-box>
+          <s-stack direction="block" gap="base">
+            {/* Header */}
+            <s-box padding="base">
+              <s-text type="strong">{selectedLineItem.title || "Product"}</s-text>
+              <s-text type="small">
+                Select {stillNeeded} {alreadyAssignedCount > 0 ? "More " : ""}
+                Serial Number{stillNeeded > 1 ? "s" : ""}
+              </s-text>
+              <s-text type="small">
+                {selectedSerialIds.length} of {stillNeeded} selected
+                {alreadyAssignedCount > 0 &&
+                  ` (${alreadyAssignedCount} already assigned)`}
+              </s-text>
+            </s-box>
+
+            {/* Serial List */}
+            {fetchingSerials ? (
+              <s-box padding="base">
+                <s-text type="generic">Loading available serials...</s-text>
+              </s-box>
+            ) : unassignedSerials.length > 0 ? (
+              <s-box padding="base">
+                <s-stack direction="block" gap="base">
+                  <s-text type="small">
+                    Available Unassigned Serials ({unassignedSerials.length}):
+                  </s-text>
+
+                  {unassignedSerials.slice(0, 20).map((serial) => {
+                    const isSelected = selectedSerialIds.includes(serial.id);
+                    const canSelect = selectedSerialIds.length < stillNeeded;
+
+                    return (
+                      <s-button
+                        key={serial.id}
+                        onClick={() => {
+                          if (isSelected) {
+                            setSelectedSerialIds((prev) =>
+                              prev.filter((id) => id !== serial.id)
+                            );
+                          } else if (canSelect) {
+                            setSelectedSerialIds((prev) => [...prev, serial.id]);
+                          }
+                        }}
+                        variant={isSelected ? "primary" : "secondary"}
+                        disabled={!isSelected && !canSelect}
+                      >
+                        {serial.serialNumber}
+                        {isSelected && " ✓"}
+                      </s-button>
+                    );
+                  })}
+
+                  {unassignedSerials.length > 20 && (
+                    <s-text type="small">
+                      ... and {unassignedSerials.length - 20} more
+                    </s-text>
+                  )}
+                </s-stack>
+              </s-box>
+            ) : (
+              <s-box padding="base">
+                <s-text type="generic">No unassigned serials available.</s-text>
+              </s-box>
+            )}
+
+            {/* Action Buttons */}
+            <s-box padding="base">
+              <s-stack direction="block" gap="base">
+                <s-button
+                  onClick={handleAssignSerial}
+                  variant="primary"
+                  disabled={assigning || selectedSerialIds.length !== stillNeeded}
+                >
+                  {assigning
+                    ? "Assigning..."
+                    : `Confirm ${selectedSerialIds.length} Serial${selectedSerialIds.length > 1 ? "s" : ""}`}
+                </s-button>
+                <s-button
+                  onClick={() => {
+                    setCurrentView('cart');
+                    setSelectedLineItem(null);
+                    setSelectedSerialIds([]);
+                  }}
+                  variant="secondary"
+                  disabled={assigning}
+                >
+                  Cancel
+                </s-button>
+              </s-stack>
+            </s-box>
+          </s-stack>
+        </s-scroll-box>
+      </s-page>
+    );
+  }
 
   if (loading) {
     return (
@@ -535,7 +645,7 @@ function CartModal() {
                                   onClick={() => {
                                     setSelectedLineItem(line);
                                     setSelectedSerialIds([]);
-                                    setShowAssignment(true);
+                                    setCurrentView('serial-assignment');
                                   }}
                                 >
                                   {isPartiallyAssigned
