@@ -122,56 +122,41 @@ export async function assignSerialsToVariant({
   serialIds,
   productId,
   variantId,
+  orderId,
 }: {
   serialIds: string[];
   productId: string;
   variantId: string;
+  orderId?: string;
 }) {
-  // Enforce single serial per variant constraint
-  if (serialIds.length > 1) {
-    throw new Error("Only one serial number can be assigned to a variant");
+  // Allow multiple serials for the same variant (for quantity > 1)
+  if (serialIds.length === 0) {
+    throw new Error("At least one serial number must be provided");
   }
 
-  // Check if this variant already has a serial assigned
-  const existingSerial = await prisma.serial.findFirst({
-    where: {
-      variantId,
-      status: { in: ["RESERVED", "SOLD"] }
-    },
-    select: { serialNumber: true }
-  });
-
-  if (existingSerial) {
-    throw new Error(`This variant already has a serial number assigned: ${existingSerial.serialNumber}`);
-  }
-
-  // First check if any of these serials are already assigned
+  // Check if any of these serials are already assigned to an order
   const alreadyAssigned = await prisma.serial.findMany({
     where: {
       id: { in: serialIds },
-      OR: [
-        { productId: { not: null } },
-        { variantId: { not: null } }
-      ]
+      status: { in: ["RESERVED", "SOLD"] }
     },
-    select: { serialNumber: true }
+    select: { serialNumber: true, status: true }
   });
 
   if (alreadyAssigned.length > 0) {
-    throw new Error(`Some serial numbers are already assigned: ${alreadyAssigned.map(s => s.serialNumber).join(', ')}`);
+    throw new Error(`Some serial numbers are already assigned: ${alreadyAssigned.map(s => `${s.serialNumber} (${s.status})`).join(', ')}`);
   }
 
-  // Update only unassigned serials
+  // Update only available/unassigned serials
   return await prisma.serial.updateMany({
-    where: { 
+    where: {
       id: { in: serialIds },
-      productId: null,
-      variantId: null,
       status: "AVAILABLE"
     },
     data: {
       productId,
       variantId,
+      orderId: orderId || null,
       status: "RESERVED",
     },
   });

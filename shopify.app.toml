@@ -19,7 +19,14 @@ api_version = "2026-01"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
-  # Comment these out for development - require protected customer data approval
+  # IMPORTANT: Uncomment these webhooks after getting protected customer data approval
+  # See: https://shopify.dev/docs/apps/launch/protected-customer-data
+  # Required for: Serial assignment flow (reserve in cart → link on order create → mark sold on payment)
+
+  # [[webhooks.subscriptions]]
+  # topics = [ "orders/create" ]
+  # uri = "/webhooks/orders/create"
+
   # [[webhooks.subscriptions]]
   # topics = [ "orders/paid" ]
   # uri = "/webhooks/orders/paid"

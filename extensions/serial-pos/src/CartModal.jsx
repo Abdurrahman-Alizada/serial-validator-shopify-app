@@ -14,11 +14,40 @@ function CartModal() {
   const [fetchingProductDetails, setFetchingProductDetails] = useState(false);
   const [fetchingSerials, setFetchingSerials] = useState(false);
   const [showAssignment, setShowAssignment] = useState(false);
-  const [selectedVariantId, setSelectedVariantId] = useState(null);
-  const [selectedSerialId, setSelectedSerialId] = useState("");
+  const [selectedLineItem, setSelectedLineItem] = useState(null); // Store full line item data
+  const [selectedSerialIds, setSelectedSerialIds] = useState([]); // Array of serial IDs
   const [assigning, setAssigning] = useState(false);
-  const [message, setMessage] = useState({ text: "", type: "" });
+  const [assignedSerials, setAssignedSerials] = useState({}); // Track assigned serial IDs per line item
+  const [assignedSerialDetails, setAssignedSerialDetails] = useState({}); // Track serial details per line item
   const fetchedProductIds = useRef(new Set());
+  const fetchedSerials = useRef(false); // Track if serials have been fetched
+  const previousCartKeys = useRef(new Set()); // Track previous cart items for cleanup
+
+  // Generate a stable key for tracking line items based on product, variant, and line item UUID
+  // This ensures assignments persist even when quantity changes
+  const getStableKey = useCallback((line) => {
+    const lineItemId = line.uuid || line.id;
+    return `serial_assignment_${line.productId}_${line.variantId}_${lineItemId}`;
+  }, []);
+
+  const reloadUnassignedSerials = useCallback((shopValue) => {
+    if (!shopValue) return;
+
+    setFetchingSerials(true);
+    fetch(
+      `${API_BASE_URL}/api/unassigned-serials?shop=${encodeURIComponent(shopValue)}`,
+    )
+      .then((res) => res.json())
+      .then((serialsData) => {
+        if (serialsData.success && serialsData.data) {
+          setUnassignedSerials(serialsData.data);
+        }
+      })
+      .catch(() => {
+        // Silently fail - no console in POS extensions
+      })
+      .finally(() => setFetchingSerials(false));
+  }, []);
 
   const fetchProductDetails = useCallback(
     async (lines) => {
@@ -48,8 +77,8 @@ function CartModal() {
             `${API_BASE_URL}/api/product-details?productId=gid://shopify/Product/${productId}`,
           )
             .then((res) => res.json())
-            .catch((err) => {
-              console.error(`Failed to fetch product ${productId}:`, err);
+            .catch(() => {
+              // Silently fail - no console in POS extensions
               return { success: false };
             }),
         );
@@ -68,9 +97,10 @@ function CartModal() {
         // Merge with existing details
         setProductDetails((prev) => ({ ...prev, ...newDetails }));
 
-        // Fetch unassigned serials if we have shop info
+        // Fetch unassigned serials if we have shop info and haven't fetched yet
         const shopValue = Object.values(newDetails).find((d) => d.shop)?.shop;
-        if (shopValue && unassignedSerials.length === 0) {
+        if (shopValue && !fetchedSerials.current) {
+          fetchedSerials.current = true; // Mark as fetched
           setFetchingSerials(true);
           fetch(
             `${API_BASE_URL}/api/unassigned-serials?shop=${encodeURIComponent(shopValue)}`,
@@ -81,22 +111,131 @@ function CartModal() {
                 setUnassignedSerials(serialsData.data);
               }
             })
-            .catch((err) =>
-              console.error("Failed to fetch unassigned serials:", err),
-            )
+            .catch(() => {
+              // Silently fail - no console in POS extensions
+              fetchedSerials.current = false; // Reset on error so it can retry
+            })
             .finally(() => setFetchingSerials(false));
         }
       } catch (err) {
-        console.error("Error fetching product details:", err);
+        // Silently fail - no console in POS extensions
       } finally {
         setFetchingProductDetails(false);
       }
     },
-    [unassignedSerials.length],
+    [],
   );
 
   useEffect(() => {
     let mounted = true;
+
+    // Comprehensive cleanup - validates ALL storage against current cart
+    const cleanupAllStorage = async (lines) => {
+      try {
+        // Get all storage entries
+        const allEntries = await shopify.storage.entries();
+
+        if (!lines || lines.length === 0) {
+          // Cart is empty - delete ALL serial assignment storage
+          const deletePromises = [];
+          for (const [key] of allEntries) {
+            if (key.startsWith('serial_assignment_')) {
+              deletePromises.push(shopify.storage.delete(key));
+            }
+          }
+
+          if (deletePromises.length > 0) {
+            await Promise.all(deletePromises);
+          }
+
+          previousCartKeys.current.clear();
+        } else {
+          // Cart has items - build current cart keys
+          const currentCartKeys = new Set();
+          for (const line of lines) {
+            currentCartKeys.add(getStableKey(line));
+          }
+
+          // Delete any storage entries that don't match current cart
+          const deletePromises = [];
+          for (const [key] of allEntries) {
+            if (key.startsWith('serial_assignment_') && !currentCartKeys.has(key)) {
+              deletePromises.push(shopify.storage.delete(key));
+            }
+          }
+
+          if (deletePromises.length > 0) {
+            await Promise.all(deletePromises);
+          }
+
+          // Update tracking
+          previousCartKeys.current = currentCartKeys;
+        }
+      } catch (error) {
+        // Silently fail - no console in POS extensions
+      }
+    };
+
+    const syncAssignmentsFromStorage = async (lines) => {
+      try {
+        // First, clean up ALL storage against current cart
+        await cleanupAllStorage(lines);
+
+        const assignments = {};
+        const serialDetails = {};
+
+        // Now load assignments for current cart items
+        if (lines && lines.length > 0) {
+          for (const line of lines) {
+            const stableKey = getStableKey(line);
+            const storedData = await shopify.storage.get(stableKey);
+            const currentLineItemId = line.uuid || line.id;
+
+            // Type check the stored data
+            if (
+              storedData &&
+              typeof storedData === 'object' &&
+              'serialIds' in storedData &&
+              Array.isArray(storedData.serialIds) &&
+              storedData.serialIds.length > 0
+            ) {
+              // Check if this is from the same cart session by comparing UUIDs
+              const storedUuid = storedData.lineItemUuid;
+              const isSameSession = storedUuid === currentLineItemId;
+              const currentQuantity = line.quantity || 1;
+              const storedQuantity = storedData.serialIds.length;
+
+              if (isSameSession) {
+                // Same session - check quantity
+                if (storedQuantity <= currentQuantity) {
+                  // Quantity same or increased - keep existing assignments (partial or full)
+                  assignments[currentLineItemId] = storedData.serialIds;
+
+                  // Store serial details if available
+                  if ('serials' in storedData && Array.isArray(storedData.serials)) {
+                    serialDetails[currentLineItemId] = storedData.serials;
+                  }
+                } else {
+                  // Quantity decreased - clear the stale assignment
+                  await shopify.storage.delete(stableKey);
+                }
+              } else {
+                // Different session - clear the stale assignment
+                await shopify.storage.delete(stableKey);
+              }
+            }
+          }
+        }
+
+        if (mounted) {
+          // Always set state to match current cart (clear old assignments)
+          setAssignedSerials(assignments);
+          setAssignedSerialDetails(serialDetails);
+        }
+      } catch (error) {
+        // Silently fail - no console in POS extensions
+      }
+    };
 
     try {
       // Subscribe to cart changes
@@ -106,8 +245,15 @@ function CartModal() {
         if (cart && cart.lineItems && cart.lineItems.length > 0) {
           setCartItems(cart.lineItems);
           fetchProductDetails(cart.lineItems);
+
+          // Sync assignments and clean up orphaned storage
+          syncAssignmentsFromStorage(cart.lineItems);
         } else {
+          // Cart is empty - sync with empty cart to clean up all storage
+          syncAssignmentsFromStorage([]);
           setCartItems([]);
+          setAssignedSerials({});
+          setAssignedSerialDetails({});
           // Don't clear productDetails to avoid re-fetching
         }
         setLoading(false);
@@ -123,6 +269,10 @@ function CartModal() {
         ) {
           setCartItems(initialCart.lineItems);
           fetchProductDetails(initialCart.lineItems);
+          syncAssignmentsFromStorage(initialCart.lineItems);
+        } else {
+          // Initial cart is empty - clean up any orphaned storage
+          syncAssignmentsFromStorage([]);
         }
         setLoading(false);
       }
@@ -133,66 +283,108 @@ function CartModal() {
         unsubscribe();
       };
     } catch (error) {
-      console.error("Error loading cart data:", error);
+      // Silently fail - no console in POS extensions
       if (mounted) {
         setLoading(false);
       }
     }
-  }, [fetchProductDetails]);
+  }, [fetchProductDetails, getStableKey]);
 
   const handleAssignSerial = useCallback(() => {
-    if (!selectedSerialId || !selectedVariantId) {
-      setMessage({ text: "Please select a serial number", type: "error" });
+    if (!selectedLineItem || selectedSerialIds.length === 0) {
       return;
     }
 
-    const selectedVariantData = selectedVariantId.split("|");
-    const productId = selectedVariantData[0];
-    const variantId = selectedVariantData[1];
+    const requiredQuantity = selectedLineItem.quantity || 1;
+    const lineItemId = selectedLineItem.uuid || selectedLineItem.id;
+
+    // Get existing assignments
+    const existingSerialIds = assignedSerials[lineItemId] || [];
+    const existingSerialDetails = assignedSerialDetails[lineItemId] || [];
+    const alreadyAssignedCount = existingSerialIds.length;
+    const remainingNeeded = requiredQuantity - alreadyAssignedCount;
+
+    // Validate that we're assigning the correct number of additional serials
+    if (selectedSerialIds.length !== remainingNeeded) {
+      return;
+    }
+
+    const productId = selectedLineItem.productId;
+    const variantId = selectedLineItem.variantId;
 
     setAssigning(true);
-    setMessage({ text: "Assigning serial...", type: "info" });
 
-    fetch(`${API_BASE_URL}/api/assign-serial-to-variant`, {
+    // Merge new serials with existing ones
+    const allSerialIds = [...existingSerialIds, ...selectedSerialIds];
+
+    fetch(`${API_BASE_URL}/api/assign-serials-to-line-item`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        serialId: selectedSerialId,
+        serialIds: selectedSerialIds, // Only send the NEW serials to backend
         productId: productId,
         variantId: variantId,
+        lineItemId: lineItemId,
       }),
     })
       .then((res) => res.json())
       .then((data) => {
         if (data.success) {
-          setMessage({
-            text: "Serial assigned successfully!",
-            type: "success",
+          // Get serial details for newly assigned serials
+          const newSerialDetails = selectedSerialIds.map(serialId => {
+            const serial = unassignedSerials.find(s => s.id === serialId);
+            return {
+              id: serialId,
+              serialNumber: serial?.serialNumber || `Serial #${serialId}`
+            };
           });
-          setSelectedVariantId(null);
-          setSelectedSerialId("");
-          setShowAssignment(false);
 
-          // Clear cache and reload
-          fetchedProductIds.current.clear();
-          const cart = shopify.cart.current.value;
-          if (cart && cart.lineItems) {
-            fetchProductDetails(cart.lineItems);
-          }
-        } else {
-          setMessage({
-            text: data.message || "Failed to assign serial",
-            type: "error",
+          // Merge with existing serial details
+          const allSerialDetails = [...existingSerialDetails, ...newSerialDetails];
+
+          // Store ALL assigned serials (existing + new) for this line item in state
+          setAssignedSerials((prev) => ({
+            ...prev,
+            [lineItemId]: allSerialIds,
+          }));
+
+          // Store ALL serial details in state
+          setAssignedSerialDetails((prev) => ({
+            ...prev,
+            [lineItemId]: allSerialDetails,
+          }));
+
+          // Persist ALL serials to Shopify Storage API using stable key
+          const stableKey = getStableKey(selectedLineItem);
+          shopify.storage.set(stableKey, {
+            serialIds: allSerialIds,
+            serials: allSerialDetails,
+            productId: productId,
+            variantId: variantId,
+            quantity: selectedLineItem.quantity || 1,
+            lineItemUuid: lineItemId, // Store UUID to detect new cart sessions
+            timestamp: Date.now()
           });
+
+          // Wait 1 second before closing
+          setTimeout(() => {
+            setSelectedLineItem(null);
+            setSelectedSerialIds([]);
+            setShowAssignment(false);
+          }, 1000);
+
+          // Reload unassigned serials
+          const product = productDetails[productId];
+          if (product?.shop) {
+            reloadUnassignedSerials(product.shop);
+          }
         }
         setAssigning(false);
       })
-      .catch((error) => {
-        console.error("Assignment error:", error);
-        setMessage({ text: "Error assigning serial", type: "error" });
+      .catch(() => {
         setAssigning(false);
       });
-  }, [selectedSerialId, selectedVariantId, fetchProductDetails]);
+  }, [selectedLineItem, selectedSerialIds, productDetails, reloadUnassignedSerials, getStableKey, unassignedSerials, assignedSerials, assignedSerialDetails]);
 
   if (loading) {
     return (
@@ -304,26 +496,57 @@ function CartModal() {
                     )}
 
                     {/* Serial Required Badge and Assign Button */}
-                    {product && requiresSerial && !variant?.assignedSerial && (
-                      <s-stack direction="inline" gap="small" alignItems="center">
-                        <s-button
-                          variant="secondary"
-                          onClick={() => {
-                            setSelectedVariantId(`${productId}|${variantId}`);
-                            setShowAssignment(true);
-                          }}
-                        >
-                          Assign
-                        </s-button>
-                      </s-stack>
-                    )}
-
-                    {/* Assigned Serial Info */}
-                    {requiresSerial && variant?.assignedSerial && (
+                    {product && requiresSerial && (
                       <s-stack direction="block" gap="small">
-                        <s-text type="small">
-                          Serial: {variant.assignedSerial.serialNumber}
-                        </s-text>
+                        {(() => {
+                          const lineItemId = line.uuid || line.id;
+                          const assignedCount = assignedSerials[lineItemId]?.length || 0;
+                          const isFullyAssigned = assignedCount === quantity;
+                          const isPartiallyAssigned = assignedCount > 0 && assignedCount < quantity;
+
+                          return (
+                            <>
+                              {/* Show assigned serials if any */}
+                              {assignedCount > 0 && (
+                                <s-stack direction="block" gap="small">
+                                  <s-text type="strong">
+                                    {isFullyAssigned ? '✓ ' : ''}Assigned Serial{assignedCount > 1 ? 's' : ''} ({assignedCount}/{quantity}):
+                                  </s-text>
+                                  {assignedSerialDetails[lineItemId] ? (
+                                    assignedSerialDetails[lineItemId].map((serial) => (
+                                      <s-text key={serial.id} type="generic">
+                                        • {serial.serialNumber}
+                                      </s-text>
+                                    ))
+                                  ) : (
+                                    assignedSerials[lineItemId].map((serialId) => (
+                                      <s-text key={serialId} type="generic">
+                                        • Serial #{serialId}
+                                      </s-text>
+                                    ))
+                                  )}
+                                </s-stack>
+                              )}
+
+                              {/* Show assign button if not fully assigned */}
+                              {!isFullyAssigned && (
+                                <s-button
+                                  variant="secondary"
+                                  onClick={() => {
+                                    setSelectedLineItem(line);
+                                    setSelectedSerialIds([]);
+                                    setShowAssignment(true);
+                                  }}
+                                >
+                                  {isPartiallyAssigned
+                                    ? `Assign ${quantity - assignedCount} More Serial${quantity - assignedCount > 1 ? 's' : ''}`
+                                    : `Assign Serials (${quantity} needed)`
+                                  }
+                                </s-button>
+                              )}
+                            </>
+                          );
+                        })()}
                       </s-stack>
                     )}
                   </s-stack>
@@ -358,27 +581,24 @@ function CartModal() {
           </s-box>
 
           {/* Serial Assignment Modal - Only when assigning */}
-          {showAssignment && selectedVariantId && (
+          {showAssignment && selectedLineItem && (() => {
+            const lineItemId = selectedLineItem.uuid || selectedLineItem.id;
+            const alreadyAssigned = assignedSerials[lineItemId]?.length || 0;
+            const totalNeeded = selectedLineItem.quantity || 1;
+            const stillNeeded = totalNeeded - alreadyAssigned;
+
+            return (
             <>
               <s-box padding="base">
-                <s-text type="strong">Select Serial Number</s-text>
+                <s-text type="strong">
+                  Select {stillNeeded} {alreadyAssigned > 0 ? 'More ' : ''}Serial Number
+                  {stillNeeded > 1 ? "s" : ""}
+                </s-text>
+                <s-text type="small">
+                  {selectedSerialIds.length} of {stillNeeded} selected
+                  {alreadyAssigned > 0 && ` (${alreadyAssigned} already assigned)`}
+                </s-text>
               </s-box>
-
-              {message.text && (
-                <s-box padding="base">
-                  <s-banner
-                    tone={
-                      message.type === "success"
-                        ? "success"
-                        : message.type === "error"
-                          ? "critical"
-                          : "info"
-                    }
-                  >
-                    <s-text type="generic">{message.text}</s-text>
-                  </s-banner>
-                </s-box>
-              )}
 
               {fetchingSerials ? (
                 <s-box padding="base">
@@ -391,55 +611,67 @@ function CartModal() {
                       Available Unassigned Serials ({unassignedSerials.length}):
                     </s-text>
 
-                    {unassignedSerials.slice(0, 10).map((serial) => (
-                      <s-button
-                        key={serial.id}
-                        onClick={() => {
-                          setSelectedSerialId(serial.id);
-                          setMessage({
-                            text: `Selected: ${serial.serialNumber}`,
-                            type: "success",
-                          });
-                        }}
-                        variant={
-                          selectedSerialId === serial.id
-                            ? "primary"
-                            : "secondary"
-                        }
-                      >
-                        {serial.serialNumber}
-                      </s-button>
-                    ))}
+                    {unassignedSerials.slice(0, 20).map((serial) => {
+                      const isSelected = selectedSerialIds.includes(serial.id);
+                      const canSelect = selectedSerialIds.length < stillNeeded;
 
-                    {unassignedSerials.length > 10 && (
+                      return (
+                        <s-button
+                          key={serial.id}
+                          onClick={() => {
+                            if (isSelected) {
+                              // Deselect
+                              setSelectedSerialIds((prev) =>
+                                prev.filter((id) => id !== serial.id),
+                              );
+                            } else if (canSelect) {
+                              // Select
+                              setSelectedSerialIds((prev) => [
+                                ...prev,
+                                serial.id,
+                              ]);
+                            }
+                          }}
+                          variant={isSelected ? "primary" : "secondary"}
+                          disabled={!isSelected && !canSelect}
+                        >
+                          {serial.serialNumber}
+                          {isSelected && " ✓"}
+                        </s-button>
+                      );
+                    })}
+
+                    {unassignedSerials.length > 20 && (
                       <s-text type="small">
-                        ... and {unassignedSerials.length - 10} more
+                        ... and {unassignedSerials.length - 20} more
                       </s-text>
                     )}
 
-                    {selectedSerialId && (
-                      <s-stack direction="block" gap="base">
-                        <s-button
-                          onClick={handleAssignSerial}
-                          variant="primary"
-                          disabled={assigning}
-                        >
-                          {assigning ? "Assigning..." : "Confirm Assignment"}
-                        </s-button>
-                        <s-button
-                          onClick={() => {
-                            setSelectedVariantId(null);
-                            setSelectedSerialId("");
-                            setShowAssignment(false);
-                            setMessage({ text: "", type: "" });
-                          }}
-                          variant="secondary"
-                          disabled={assigning}
-                        >
-                          Cancel
-                        </s-button>
-                      </s-stack>
-                    )}
+                    <s-stack direction="block" gap="base">
+                      <s-button
+                        onClick={handleAssignSerial}
+                        variant="primary"
+                        disabled={
+                          assigning ||
+                          selectedSerialIds.length !== stillNeeded
+                        }
+                      >
+                        {assigning
+                          ? "Assigning..."
+                          : `Confirm ${selectedSerialIds.length} Serial${selectedSerialIds.length > 1 ? "s" : ""}`}
+                      </s-button>
+                      <s-button
+                        onClick={() => {
+                          setSelectedLineItem(null);
+                          setSelectedSerialIds([]);
+                          setShowAssignment(false);
+                        }}
+                        variant="secondary"
+                        disabled={assigning}
+                      >
+                        Cancel
+                      </s-button>
+                    </s-stack>
                   </s-stack>
                 </s-box>
               ) : (
@@ -450,7 +682,8 @@ function CartModal() {
                 </s-box>
               )}
             </>
-          )}
+            );
+          })()}
 
           {/* Checkout Button */}
           <s-box padding="base">
