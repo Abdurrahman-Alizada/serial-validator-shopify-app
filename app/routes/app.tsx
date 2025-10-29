@@ -23,7 +23,6 @@ export default function App() {
   // Determine which tab is active based on current path
   const isDashboardActive = location.pathname === "/app";
   const isProductsActive = location.pathname === "/app/products" || location.pathname.startsWith("/app/products/");
-  const isAssignmentActive = location.pathname === "/app/assignment" || location.pathname.startsWith("/app/assignment/");
 
   // Check if navigation is in progress
   const isNavigating = navigation.state === "loading";

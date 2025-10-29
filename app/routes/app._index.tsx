@@ -17,12 +17,8 @@ import {
   Modal,
   FormLayout,
   DropZone,
-  List,
   Checkbox,
-  Spinner,
   EmptyState,
-  SkeletonBodyText,
-  SkeletonDisplayText
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -197,7 +193,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Dashboard() {
-  const { serials, stats, products, variants, unassignedSerials } = useLoaderData<typeof loader>();
+  const { serials, stats, products, variants } = useLoaderData<typeof loader>();
   const [searchValue, setSearchValue] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [productFilter, setProductFilter] = useState('All');
@@ -266,10 +262,6 @@ export default function Dashboard() {
 
   const handleSerialNumberChange = useCallback((value: string) => {
     setSerialNumber(value);
-  }, []);
-
-  const handleVariantChange = useCallback((value: string) => {
-    setSelectedVariant(value);
   }, []);
 
   const handleSubmit = useCallback(() => {
