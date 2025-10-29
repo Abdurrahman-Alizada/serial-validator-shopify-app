@@ -49,7 +49,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         data: {
           status: 'SOLD',
           soldAt: new Date(),
-          customerId: customerId,
           updatedAt: new Date()
         }
       });

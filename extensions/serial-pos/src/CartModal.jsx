@@ -33,12 +33,12 @@ function CartModal() {
     return `serial_assignment_${line.productId}_${line.variantId}_${lineItemId}`;
   }, []);
 
-  const reloadUnassignedSerials = useCallback((shopValue) => {
-    if (!shopValue) return;
+  const reloadUnassignedSerials = useCallback((shopValue, productId, variantId) => {
+    if (!shopValue || !productId || !variantId) return;
 
     setFetchingSerials(true);
     fetch(
-      `${API_BASE_URL}/api/unassigned-serials?shop=${encodeURIComponent(shopValue)}`,
+      `${API_BASE_URL}/api/unassigned-serials?shop=${encodeURIComponent(shopValue)}&productId=${encodeURIComponent(productId)}&variantId=${encodeURIComponent(variantId)}`,
     )
       .then((res) => res.json())
       .then((serialsData) => {
@@ -100,26 +100,8 @@ function CartModal() {
         // Merge with existing details
         setProductDetails((prev) => ({ ...prev, ...newDetails }));
 
-        // Fetch unassigned serials if we have shop info and haven't fetched yet
-        const shopValue = Object.values(newDetails).find((d) => d.shop)?.shop;
-        if (shopValue && !fetchedSerials.current) {
-          fetchedSerials.current = true; // Mark as fetched
-          setFetchingSerials(true);
-          fetch(
-            `${API_BASE_URL}/api/unassigned-serials?shop=${encodeURIComponent(shopValue)}`,
-          )
-            .then((res) => res.json())
-            .then((serialsData) => {
-              if (serialsData.success && serialsData.data) {
-                setUnassignedSerials(serialsData.data);
-              }
-            })
-            .catch(() => {
-              // Silently fail - no console in POS extensions
-              fetchedSerials.current = false; // Reset on error so it can retry
-            })
-            .finally(() => setFetchingSerials(false));
-        }
+        // Note: We don't fetch serials globally anymore
+        // Serials are fetched per line item when the user clicks "Assign Serials"
       } catch (err) {
         // Silently fail - no console in POS extensions
       } finally {
@@ -377,10 +359,10 @@ function CartModal() {
             setCurrentView('cart');
           }, 1000);
 
-          // Reload unassigned serials
+          // Reload unassigned serials for this specific product/variant
           const product = productDetails[productId];
           if (product?.shop) {
-            reloadUnassignedSerials(product.shop);
+            reloadUnassignedSerials(product.shop, productId, variantId);
           }
         }
         setAssigning(false);
@@ -396,6 +378,15 @@ function CartModal() {
     const alreadyAssignedCount = assignedSerials[lineItemId]?.length || 0;
     const totalNeeded = selectedLineItem.quantity || 1;
     const stillNeeded = totalNeeded - alreadyAssignedCount;
+
+    // Load serials for this specific product/variant if not already loaded
+    const productId = selectedLineItem.productId;
+    const variantId = selectedLineItem.variantId;
+    const product = productDetails[productId];
+
+    if (product && unassignedSerials.length === 0 && !fetchingSerials) {
+      reloadUnassignedSerials(product.shop, productId, variantId);
+    }
 
     return (
       <s-page heading="Serial Assignment">
@@ -645,7 +636,14 @@ function CartModal() {
                                   onClick={() => {
                                     setSelectedLineItem(line);
                                     setSelectedSerialIds([]);
+                                    setUnassignedSerials([]); // Clear previous serials
                                     setCurrentView('serial-assignment');
+
+                                    // Fetch serials for this specific product/variant
+                                    const prod = productDetails[line.productId];
+                                    if (prod && prod.shop) {
+                                      reloadUnassignedSerials(prod.shop, line.productId, line.variantId);
+                                    }
                                   }}
                                 >
                                   {isPartiallyAssigned

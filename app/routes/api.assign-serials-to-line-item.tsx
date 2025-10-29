@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
-import { assignSerialsToVariant } from "../db.server";
+import { reserveSerialsForOrder } from "../db.server";
 import prisma from "../db.server";
 
 const corsHeaders = {
@@ -87,12 +87,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     console.log('[API] Reserving serials for product:', product.id, 'variant:', variant.id);
 
-    // During cart/checkout, we RESERVE serials but don't assign orderId yet
+    // Verify that the serials are ASSIGNED to this product/variant
+    const serialsToReserve = await prisma.serial.findMany({
+      where: {
+        id: { in: serialIds },
+        productId: product.id,
+        variantId: variant.id,
+        status: "ASSIGNED"
+      },
+      select: { id: true }
+    });
+
+    if (serialsToReserve.length !== serialIds.length) {
+      console.log('[API] Error: Some serials are not assigned to this product/variant');
+      return data({
+        success: false,
+        message: "Some serials are not assigned to this product/variant or are already reserved"
+      }, { status: 400, headers: corsHeaders });
+    }
+
+    // Change status from ASSIGNED to RESERVED for cart/checkout
     // The orderId will be assigned later when the order is actually placed via webhook
-    const result = await assignSerialsToVariant({
+    const result = await reserveSerialsForOrder({
       serialIds,
-      productId: product.id,
-      variantId: variant.id,
       orderId: undefined, // Don't assign orderId yet - will be set after order placement
     });
 

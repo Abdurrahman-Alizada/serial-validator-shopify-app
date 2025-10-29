@@ -144,29 +144,6 @@ export default function App() {
                   Products
                 </div>
               </Link>
-
-              <Link to="/app/assignment" prefetch="intent" style={{ textDecoration: "none" }} onClick={() => setMobileMenuOpen(false)}>
-                <div style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.75rem",
-                  padding: "0.75rem 1rem",
-                  borderRadius: "0.5rem",
-                  backgroundColor: isAssignmentActive ? "#dcfce7" : "transparent",
-                  color: isAssignmentActive ? "#00A047" : "#6b7280",
-                  fontWeight: isAssignmentActive ? "500" : "400",
-                  cursor: "pointer",
-                  transition: "all 0.2s ease"
-                }}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M16 2H8C7.44772 2 7 2.44772 7 3V21C7 21.5523 7.44772 22 8 22H16C16.5523 22 17 21.5523 17 21V3C17 2.44772 16.5523 2 16 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M9 7H15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M9 11H15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M9 15H13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                  Assignment
-                </div>
-              </Link>
             </div>
           </nav>
 

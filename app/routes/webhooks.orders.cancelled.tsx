@@ -40,7 +40,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return { count: 0, serials: [] };
       }
 
-      // Mark them as available
+      // Mark them as ASSIGNED (not AVAILABLE) to keep product/variant association
       const result = await tx.serial.updateMany({
         where: {
           orderId: orderId,
@@ -50,19 +50,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           shop: shop
         },
         data: {
-          status: 'AVAILABLE',
+          status: 'ASSIGNED',
           orderId: null,
-          customerId: null,
           soldAt: null,
-          reservedAt: null,
-          reservedUntil: null,
-          returnedAt: null,
           updatedAt: new Date()
         }
       });
 
 
-      console.log(`Released ${result.count} serials for cancelled order ${orderId}`);
+      console.log(`Released ${result.count} serials back to ASSIGNED status for cancelled order ${orderId}`);
       return { count: result.count, serials: orderSerials };
     });
 
