@@ -27,13 +27,17 @@ export async function createSerial({
   variantId?: string;
   shop: string;
 }) {
+  // If productId and variantId are provided, set status to ASSIGNED
+  // Otherwise, set status to AVAILABLE (unassigned serial)
+  const status = (productId && variantId) ? "ASSIGNED" : "AVAILABLE";
+
   return await prisma.serial.create({
     data: {
       serialNumber,
       productId,
       variantId,
       shop,
-      status: "AVAILABLE",
+      status,
     },
   });
 }

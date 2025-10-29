@@ -189,6 +189,53 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
+  if (intent === "bulkDeleteSerials") {
+    const serialIdsString = formData.get("serialIds") as string;
+
+    if (!serialIdsString) {
+      return { success: false, message: "Serial IDs are required" };
+    }
+
+    try {
+      const serialIds = JSON.parse(serialIdsString) as string[];
+
+      if (!Array.isArray(serialIds) || serialIds.length === 0) {
+        return { success: false, message: "Invalid serial IDs" };
+      }
+
+      // Verify all serials belong to the current shop
+      const existingSerials = await prisma.serial.findMany({
+        where: {
+          id: { in: serialIds },
+          shop: session.shop
+        },
+      });
+
+      if (existingSerials.length !== serialIds.length) {
+        return {
+          success: false,
+          message: `Only ${existingSerials.length} of ${serialIds.length} serial numbers found`
+        };
+      }
+
+      // Delete all serials
+      const result = await prisma.serial.deleteMany({
+        where: {
+          id: { in: serialIds },
+          shop: session.shop,
+        },
+      });
+
+      return {
+        success: true,
+        message: `Successfully deleted ${result.count} serial number${result.count !== 1 ? 's' : ''}`
+      };
+    } catch (error) {
+      console.error("Error bulk deleting serials:", error);
+      return { success: false, message: "Failed to delete serial numbers" };
+    }
+  }
+
   return null;
 };
 
@@ -200,10 +247,14 @@ export default function Dashboard() {
   const [selectedSerials, setSelectedSerials] = useState<string[]>([]);
   const [modalActive, setModalActive] = useState(false);
   const [bulkImportModalActive, setBulkImportModalActive] = useState(false);
+  const [autoAssignImportModalActive, setAutoAssignImportModalActive] = useState(false);
   const [serialNumber, setSerialNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
   const [bulkCsvFile, setBulkCsvFile] = useState<File | null>(null);
   const [csvPreviewData, setCsvPreviewData] = useState<string[]>([]);
+  const [autoAssignCsvFile, setAutoAssignCsvFile] = useState<File | null>(null);
+  const [autoAssignPreviewData, setAutoAssignPreviewData] = useState<Array<{itemNo: string, varNo: string, serial: string, productId?: string, variantId?: string, error?: string}>>([]);
+  const [showAutoAssignPreview, setShowAutoAssignPreview] = useState(false);
   const [showCsvPreview, setShowCsvPreview] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -211,6 +262,7 @@ export default function Dashboard() {
   const [itemsPerPage, setItemsPerPage] = useState('25');
   const [editModalActive, setEditModalActive] = useState(false);
   const [deleteModalActive, setDeleteModalActive] = useState(false);
+  const [bulkDeleteModalActive, setBulkDeleteModalActive] = useState(false);
   const [selectedSerialForEdit, setSelectedSerialForEdit] = useState<any>(null);
   const [editSerialNumber, setEditSerialNumber] = useState('');
   const [editSelectedVariant, setEditSelectedVariant] = useState('');
@@ -435,6 +487,24 @@ export default function Dashboard() {
     setSelectedSerialForEdit(null);
   }, [fetcher, selectedSerialForEdit]);
 
+  const handleBulkDeleteModalToggle = useCallback(() => {
+    setBulkDeleteModalActive(!bulkDeleteModalActive);
+  }, [bulkDeleteModalActive]);
+
+  const handleBulkDeleteSubmit = useCallback(() => {
+    if (selectedSerials.length === 0) return;
+
+    fetcher.submit(
+      {
+        intent: 'bulkDeleteSerials',
+        serialIds: JSON.stringify(selectedSerials),
+      },
+      { method: 'post' }
+    );
+    setBulkDeleteModalActive(false);
+    setSelectedSerials([]);
+  }, [fetcher, selectedSerials]);
+
   const handleBulkImport = useCallback(() => {
     if (csvPreviewData.length === 0) return;
 
@@ -459,6 +529,164 @@ export default function Dashboard() {
     setEditingIndex(null);
     setEditValue('');
   }, [fetcher, csvPreviewData]);
+
+  const handleAutoAssignImportToggle = useCallback(() => {
+    setAutoAssignImportModalActive(!autoAssignImportModalActive);
+    if (!autoAssignImportModalActive) {
+      setAutoAssignCsvFile(null);
+      setAutoAssignPreviewData([]);
+      setShowAutoAssignPreview(false);
+    }
+  }, [autoAssignImportModalActive]);
+
+  const processAutoAssignCsvFile = useCallback(async (file: File) => {
+    const text = await file.text();
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+
+    if (lines.length === 0) {
+      return;
+    }
+
+    // Skip header row if it exists
+    const dataLines = lines.filter((line, index) => {
+      const upper = line.toUpperCase();
+      return index === 0 ?
+        !(upper.includes('ITEM') && upper.includes('VAR') && upper.includes('SERIAL')) :
+        true;
+    });
+
+    const parsedData = dataLines.map((line, index) => {
+      const values = line.split(',').map(v => v.trim());
+
+      if (values.length < 3) {
+        return {
+          itemNo: values[0] || '',
+          varNo: values[1] || '',
+          serial: values[2] || '',
+          error: 'Invalid format: Expected 3 columns (ITEM_NO, VAR_NO, SERIAL)'
+        };
+      }
+
+      const itemNo = values[0];
+      const varNo = values[1];
+      const serial = values[2];
+
+      // Validate required fields
+      if (!itemNo || !serial) {
+        return {
+          itemNo,
+          varNo,
+          serial,
+          error: 'ITEM_NO and SERIAL are required'
+        };
+      }
+
+      // Find matching product by handle, SKU, or ID
+      const matchingProduct = products.find(p => {
+        const itemUpper = itemNo.toUpperCase();
+        return (
+          p.handle?.toUpperCase() === itemUpper ||
+          p.title.toUpperCase() === itemUpper ||
+          p.id === itemNo ||
+          p.shopifyId === itemNo ||
+          p.shopifyId === `gid://shopify/Product/${itemNo}`
+        );
+      });
+
+      if (!matchingProduct) {
+        return {
+          itemNo,
+          varNo,
+          serial,
+          error: `Product not found: "${itemNo}"`
+        };
+      }
+
+      // If VAR_NO is provided and not NULL/empty, find matching variant
+      let matchingVariant = null;
+      if (varNo && varNo.toUpperCase() !== 'NULL' && varNo !== '-') {
+        matchingVariant = matchingProduct.variants?.find(v => {
+          const varUpper = varNo.toUpperCase();
+          return (
+            v.sku?.toUpperCase() === varUpper ||
+            v.title?.toUpperCase() === varUpper ||
+            v.id === varNo ||
+            v.shopifyId === varNo ||
+            v.shopifyId === `gid://shopify/ProductVariant/${varNo}`
+          );
+        });
+
+        if (!matchingVariant) {
+          return {
+            itemNo,
+            varNo,
+            serial,
+            productId: matchingProduct.id,
+            error: `Variant not found: "${varNo}" for product "${matchingProduct.title}"`
+          };
+        }
+      } else {
+        // No variant specified or NULL - use default variant (first one)
+        matchingVariant = matchingProduct.variants?.[0];
+        if (!matchingVariant) {
+          return {
+            itemNo,
+            varNo,
+            serial,
+            productId: matchingProduct.id,
+            error: `No variants found for product "${matchingProduct.title}"`
+          };
+        }
+      }
+
+      return {
+        itemNo,
+        varNo,
+        serial,
+        productId: matchingProduct.id,
+        variantId: matchingVariant.id,
+      };
+    });
+
+    setAutoAssignPreviewData(parsedData);
+    setShowAutoAssignPreview(true);
+  }, [products]);
+
+  const handleAutoAssignCsvFileSelect = useCallback((files: File[]) => {
+    const file = files[0];
+    setAutoAssignCsvFile(file);
+    if (file) {
+      processAutoAssignCsvFile(file);
+    }
+  }, [processAutoAssignCsvFile]);
+
+  const handleAutoAssignImport = useCallback(() => {
+    if (autoAssignPreviewData.length === 0) return;
+
+    // Filter out rows with errors
+    const validRows = autoAssignPreviewData.filter(row => !row.error && row.productId && row.variantId);
+
+    if (validRows.length === 0) return;
+
+    // Create JSON payload
+    const payload = {
+      serials: validRows.map(row => ({
+        serialNumber: row.serial,
+        productId: row.productId,
+        variantId: row.variantId,
+      }))
+    };
+
+    fetcher.submit(
+      { intent: 'autoAssignImport', data: JSON.stringify(payload) },
+      { method: 'post', action: '/api/auto-assign-import' }
+    );
+
+    setAutoAssignImportModalActive(false);
+    setAutoAssignCsvFile(null);
+    setAutoAssignPreviewData([]);
+    setShowAutoAssignPreview(false);
+  }, [fetcher, autoAssignPreviewData]);
 
   const handleSerialSelection = useCallback((serialId: string, checked: boolean) => {
     setSelectedSerials(prev => {
@@ -698,6 +926,12 @@ export default function Dashboard() {
                   Bulk Import
                 </Button>
                 <Button
+                  onClick={() => setAutoAssignImportModalActive(true)}
+                  disabled={isLoading}
+                >
+                  Auto-Assign Import
+                </Button>
+                <Button
                   onClick={() => window.open(`/api/export-serials?format=csv`, '_blank')}
                   disabled={isLoading}
                 >
@@ -705,6 +939,34 @@ export default function Dashboard() {
                 </Button>
               </InlineStack>
             </BlockStack>
+
+            {/* Bulk Actions */}
+            {selectedSerials.length > 0 && (
+              <BlockStack gap="300">
+                <Card>
+                  <InlineStack align="space-between" blockAlign="center">
+                    <Text as="p" variant="bodyMd">
+                      {selectedSerials.length} serial{selectedSerials.length !== 1 ? 's' : ''} selected
+                    </Text>
+                    <InlineStack gap="300">
+                      <Button
+                        onClick={() => setSelectedSerials([])}
+                        variant="plain"
+                      >
+                        Clear Selection
+                      </Button>
+                      <Button
+                        onClick={handleBulkDeleteModalToggle}
+                        tone="critical"
+                        disabled={isLoading}
+                      >
+                        Delete Selected ({selectedSerials.length})
+                      </Button>
+                    </InlineStack>
+                  </InlineStack>
+                </Card>
+              </BlockStack>
+            )}
 
             {/* Search and Filter */}
             <BlockStack gap="300">
@@ -1154,6 +1416,185 @@ export default function Dashboard() {
               This action cannot be undone.
             </Text>
           </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Bulk Delete Modal */}
+      <Modal
+        open={bulkDeleteModalActive}
+        onClose={handleBulkDeleteModalToggle}
+        title="Delete Multiple Serial Numbers"
+        primaryAction={{
+          content: `Delete ${selectedSerials.length} Serial${selectedSerials.length !== 1 ? 's' : ''}`,
+          onAction: handleBulkDeleteSubmit,
+          destructive: true,
+          disabled: isLoading || selectedSerials.length === 0,
+          loading: isLoading,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: handleBulkDeleteModalToggle,
+          },
+        ]}
+      >
+        <Modal.Section>
+          <BlockStack gap="300">
+            <Text as="p" variant="bodyMd">
+              Are you sure you want to delete <strong>{selectedSerials.length}</strong> selected serial number{selectedSerials.length !== 1 ? 's' : ''}?
+            </Text>
+
+            <Card>
+              <BlockStack gap="200">
+                <Text as="p" variant="bodyMd" tone="subdued">
+                  This will permanently delete:
+                </Text>
+                <InlineStack gap="400" wrap>
+                  <Text as="p" variant="bodyMd">
+                    • {selectedSerials.length} serial number{selectedSerials.length !== 1 ? 's' : ''}
+                  </Text>
+                  <Text as="p" variant="bodyMd">
+                    • All associated data
+                  </Text>
+                </InlineStack>
+              </BlockStack>
+            </Card>
+
+            <Text as="p" variant="bodySm" tone="critical">
+              ⚠️ This action cannot be undone. All selected serial numbers will be permanently removed from the database.
+            </Text>
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
+
+      {/* Auto-Assign Import Modal */}
+      <Modal
+        open={autoAssignImportModalActive}
+        onClose={handleAutoAssignImportToggle}
+        title="Auto-Assign Import"
+        primaryAction={{
+          content: showAutoAssignPreview && autoAssignPreviewData.length > 0
+            ? `Import ${autoAssignPreviewData.filter(r => !r.error).length} Serial${autoAssignPreviewData.filter(r => !r.error).length !== 1 ? 's' : ''}`
+            : 'Import Serials',
+          onAction: handleAutoAssignImport,
+          disabled: (() => {
+            if (isLoading) return true;
+            if (!showAutoAssignPreview) return true;
+            const validRows = autoAssignPreviewData.filter(r => !r.error);
+            return validRows.length === 0;
+          })(),
+          loading: isLoading,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: handleAutoAssignImportToggle,
+          },
+        ]}
+      >
+        <Modal.Section>
+          <FormLayout>
+            <BlockStack gap="300">
+              <Text as="p" variant="bodyMd">
+                Upload a CSV file with 3 columns: <strong>ITEM_NO</strong>, <strong>VAR_NO</strong>, <strong>SERIAL</strong>
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                • ITEM_NO: Product handle, title, or Shopify ID<br/>
+                • VAR_NO: Variant SKU, title, Shopify ID, or "NULL" for default variant<br/>
+                • SERIAL: Serial number to assign
+              </Text>
+
+              <DropZone
+                label="CSV File"
+                onDrop={handleAutoAssignCsvFileSelect}
+                accept=".csv,text/csv"
+                allowMultiple={false}
+              >
+                <DropZone.FileUpload />
+              </DropZone>
+
+              {/* CSV Preview Section */}
+              {showAutoAssignPreview && autoAssignPreviewData.length > 0 && (
+                <Card>
+                  <BlockStack gap="300">
+                    <InlineStack align="space-between">
+                      <Text as="h3" variant="headingSm">
+                        Preview ({autoAssignPreviewData.filter(r => !r.error).length} valid, {autoAssignPreviewData.filter(r => r.error).length} errors)
+                      </Text>
+                      <Button
+                        size="micro"
+                        variant="plain"
+                        tone="critical"
+                        onClick={() => {
+                          setAutoAssignPreviewData([]);
+                          setShowAutoAssignPreview(false);
+                          setAutoAssignCsvFile(null);
+                        }}
+                        disabled={isLoading}
+                      >
+                        Clear All
+                      </Button>
+                    </InlineStack>
+
+                    <div style={{
+                      maxHeight: '300px',
+                      overflowY: 'auto',
+                      border: '1px solid #e1e3e5',
+                      borderRadius: '6px',
+                      padding: '8px'
+                    }}>
+                      <BlockStack gap="200">
+                        {autoAssignPreviewData.map((row, index) => (
+                          <div key={index} style={{
+                            padding: '8px',
+                            backgroundColor: row.error ? '#fff4f4' : (index % 2 === 0 ? '#f9f9f9' : 'transparent'),
+                            borderRadius: '4px',
+                            borderLeft: row.error ? '3px solid #d72c0d' : '3px solid #008060'
+                          }}>
+                            <BlockStack gap="100">
+                              <InlineStack align="space-between">
+                                <Text as="span" variant="bodyMd">
+                                  <strong>Row {index + 1}:</strong> {row.serial}
+                                </Text>
+                                {!row.error && (
+                                  <Badge tone="success">Valid</Badge>
+                                )}
+                                {row.error && (
+                                  <Badge tone="critical">Error</Badge>
+                                )}
+                              </InlineStack>
+                              <Text as="span" variant="bodySm" tone="subdued">
+                                Item: {row.itemNo} | Variant: {row.varNo || 'NULL'}
+                              </Text>
+                              {row.error && (
+                                <Text as="span" variant="bodySm" tone="critical">
+                                  {row.error}
+                                </Text>
+                              )}
+                            </BlockStack>
+                          </div>
+                        ))}
+                      </BlockStack>
+                    </div>
+
+                    {/* Summary */}
+                    <BlockStack gap="200">
+                      {autoAssignPreviewData.filter(r => !r.error).length > 0 && (
+                        <Text as="p" variant="bodySm" tone="success">
+                          Ready to import {autoAssignPreviewData.filter(r => !r.error).length} serial number{autoAssignPreviewData.filter(r => !r.error).length !== 1 ? 's' : ''} with automatic product/variant assignment.
+                        </Text>
+                      )}
+                      {autoAssignPreviewData.filter(r => r.error).length > 0 && (
+                        <Text as="p" variant="bodySm" tone="critical">
+                          {autoAssignPreviewData.filter(r => r.error).length} row{autoAssignPreviewData.filter(r => r.error).length !== 1 ? 's' : ''} will be skipped due to errors.
+                        </Text>
+                      )}
+                    </BlockStack>
+                  </BlockStack>
+                </Card>
+              )}
+            </BlockStack>
+          </FormLayout>
         </Modal.Section>
       </Modal>
     </Page>
