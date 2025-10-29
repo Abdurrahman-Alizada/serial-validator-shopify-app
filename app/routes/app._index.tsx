@@ -17,12 +17,8 @@ import {
   Modal,
   FormLayout,
   DropZone,
-  List,
   Checkbox,
-  Spinner,
   EmptyState,
-  SkeletonBodyText,
-  SkeletonDisplayText
 } from "@shopify/polaris";
 import { useState, useCallback } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -45,6 +41,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // Get stats
     const totalSerials = serials.length;
     const availableCount = serials.filter(s => s.status === 'AVAILABLE').length;
+    const assignedCount = serials.filter(s => s.status === 'ASSIGNED').length;
     const reservedCount = serials.filter(s => s.status === 'RESERVED').length;
     const soldCount = serials.filter(s => s.status === 'SOLD').length;
     const returnedCount = serials.filter(s => s.status === 'RETURNED').length;
@@ -81,6 +78,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       stats: {
         total: totalSerials,
         available: availableCount,
+        assigned: assignedCount,
         reserved: reservedCount,
         sold: soldCount,
         returned: returnedCount,
@@ -94,7 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     console.error('Error loading dashboard data:', error);
     return {
       serials: [],
-      stats: { total: 0, available: 0, reserved: 0, sold: 0, returned: 0, deleted: 0 },
+      stats: { total: 0, available: 0, assigned: 0, reserved: 0, sold: 0, returned: 0, deleted: 0 },
       products: [],
       variants: [],
       unassignedSerials: [],
@@ -110,22 +108,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "addSerial") {
     const serialNumber = formData.get("serialNumber") as string;
-    const productId = formData.get("productId") as string;
-    const variantId = formData.get("variantId") as string;
 
     if (!serialNumber) {
       return { success: false, message: "Serial number is required" };
     }
 
     try {
+      // Create as unassigned serial (AVAILABLE status)
       await createSerial({
         serialNumber,
-        productId: productId || undefined,
-        variantId: variantId || undefined,
+        productId: undefined,
+        variantId: undefined,
         shop: session.shop,
       });
 
-      return { success: true, message: "Serial number added successfully" };
+      return { success: true, message: "Serial number added successfully. Assign it to a product from the Products screen." };
     } catch (error) {
       console.error("Error creating serial:", error);
       return { success: false, message: "Failed to add serial number" };
@@ -135,7 +132,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "editSerial") {
     const serialId = formData.get("serialId") as string;
     const serialNumber = formData.get("serialNumber") as string;
-    const variantId = formData.get("variantId") as string;
 
     if (!serialId || !serialNumber) {
       return { success: false, message: "Serial ID and number are required" };
@@ -151,21 +147,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return { success: false, message: "Serial number not found" };
       }
 
-      // Get the product ID from the variant if provided
-      let productId = existingSerial.productId;
-      if (variantId && variantId !== existingSerial.variantId) {
-        const variant = await prisma.productVariant.findUnique({
-          where: { id: variantId },
-          select: { productId: true },
-        });
-        productId = variant?.productId || null;
-      }
-
+      // Only update the serial number, keep product/variant assignments as-is
+      // Product assignments should be managed from the Products screen
       await updateSerial({
         id: serialId,
         serialNumber,
-        productId: variantId ? productId : null,
-        variantId: variantId || null,
+        productId: existingSerial.productId,
+        variantId: existingSerial.variantId,
       });
 
       return { success: true, message: "Serial number updated successfully" };
@@ -205,7 +193,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Dashboard() {
-  const { serials, stats, products, variants, unassignedSerials } = useLoaderData<typeof loader>();
+  const { serials, stats, products, variants } = useLoaderData<typeof loader>();
   const [searchValue, setSearchValue] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [productFilter, setProductFilter] = useState('All');
@@ -276,27 +264,18 @@ export default function Dashboard() {
     setSerialNumber(value);
   }, []);
 
-  const handleVariantChange = useCallback((value: string) => {
-    setSelectedVariant(value);
-  }, []);
-
   const handleSubmit = useCallback(() => {
-    const selectedVariantData = variants?.find(v => v.id === selectedVariant);
-    const productId = selectedVariantData?.productId;
-
     fetcher.submit(
       {
         intent: 'addSerial',
         serialNumber,
-        productId: productId || '',
-        variantId: selectedVariant,
       },
       { method: 'post' }
     );
     setModalActive(false);
     setSerialNumber('');
     setSelectedVariant('');
-  }, [fetcher, serialNumber, selectedVariant, variants]);
+  }, [fetcher, serialNumber]);
 
   const handleBulkImportToggle = useCallback(() => {
     setBulkImportModalActive(!bulkImportModalActive);
@@ -428,16 +407,11 @@ export default function Dashboard() {
   const handleEditSubmit = useCallback(() => {
     if (!selectedSerialForEdit || !editSerialNumber.trim()) return;
 
-    const selectedVariantData = variants?.find(v => v.id === editSelectedVariant);
-    const productId = selectedVariantData?.productId;
-
     fetcher.submit(
       {
         intent: 'editSerial',
         serialId: selectedSerialForEdit.id,
         serialNumber: editSerialNumber,
-        variantId: editSelectedVariant,
-        productId: productId || '',
       },
       { method: 'post' }
     );
@@ -445,7 +419,7 @@ export default function Dashboard() {
     setSelectedSerialForEdit(null);
     setEditSerialNumber('');
     setEditSelectedVariant('');
-  }, [fetcher, selectedSerialForEdit, editSerialNumber, editSelectedVariant, variants]);
+  }, [fetcher, selectedSerialForEdit, editSerialNumber]);
 
   const handleDeleteSubmit = useCallback(() => {
     if (!selectedSerialForEdit) return;
@@ -514,6 +488,7 @@ export default function Dashboard() {
   const statusOptions = [
     { label: 'All', value: 'All' },
     { label: 'Available', value: 'AVAILABLE' },
+    { label: 'Assigned', value: 'ASSIGNED' },
     { label: 'Reserved', value: 'RESERVED' },
     { label: 'Sold', value: 'SOLD' },
     { label: 'Returned', value: 'RETURNED' },
@@ -592,11 +567,15 @@ export default function Dashboard() {
   const getBadgeTone = (status: string): "success" | "info" | "warning" | "critical" => {
     switch (status) {
       case 'AVAILABLE':
+        return 'info';
+      case 'ASSIGNED':
         return 'success';
+      case 'RESERVED':
+        return 'warning';
       case 'SOLD':
         return 'info';
       case 'RETURNED':
-        return 'warning';
+        return 'critical';
       case 'DELETED':
         return 'critical';
       default:
@@ -657,7 +636,15 @@ export default function Dashboard() {
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Available</Text>
-                <Text as="p" variant="heading2xl" tone="success">{stats.available.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl">{stats.available.toLocaleString()}</Text>
+              </BlockStack>
+            </Card>
+          </Grid.Cell>
+          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
+            <Card>
+              <BlockStack gap="200">
+                <Text as="p" variant="bodySm" tone="subdued">Assigned</Text>
+                <Text as="p" variant="heading2xl" tone="success">{stats.assigned.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
@@ -665,7 +652,7 @@ export default function Dashboard() {
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Reserved</Text>
-                <Text as="p" variant="heading2xl" tone="warning">{stats.reserved.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl">{stats.reserved.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
@@ -673,7 +660,7 @@ export default function Dashboard() {
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Sold</Text>
-                <Text as="p" variant="heading2xl" tone="info">{stats.sold.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl">{stats.sold.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
@@ -681,15 +668,7 @@ export default function Dashboard() {
             <Card>
               <BlockStack gap="200">
                 <Text as="p" variant="bodySm" tone="subdued">Returned</Text>
-                <Text as="p" variant="heading2xl" tone="subdued">{stats.returned.toLocaleString()}</Text>
-              </BlockStack>
-            </Card>
-          </Grid.Cell>
-          <Grid.Cell columnSpan={{xs: 6, sm: 4, md: 2, lg: 2, xl: 2}}>
-            <Card>
-              <BlockStack gap="200">
-                <Text as="p" variant="bodySm" tone="subdued">Deleted</Text>
-                <Text as="p" variant="heading2xl" tone="critical">{stats.deleted.toLocaleString()}</Text>
+                <Text as="p" variant="heading2xl" tone="critical">{stats.returned.toLocaleString()}</Text>
               </BlockStack>
             </Card>
           </Grid.Cell>
@@ -702,6 +681,7 @@ export default function Dashboard() {
               <InlineStack align="space-between" blockAlign="center">
                 <Text as="h2" variant="headingLg">Serial Management</Text>
               </InlineStack>
+
               <InlineStack gap="300" wrap>
                 <Button
                   variant="primary"
@@ -884,16 +864,6 @@ export default function Dashboard() {
               onChange={handleSerialNumberChange}
               placeholder="Enter serial number"
               autoComplete="off"
-              helpText="Enter a unique serial number for tracking"
-            />
-
-            <Select
-              label="Product Variant (Optional)"
-              options={variantOptions}
-              value={selectedVariant}
-              onChange={handleVariantChange}
-              placeholder="Select a product variant (optional)"
-              helpText="Leave empty to create unassigned serial numbers"
             />
           </FormLayout>
         </Modal.Section>
@@ -936,10 +906,6 @@ export default function Dashboard() {
       >
         <Modal.Section>
           <FormLayout>
-            <Text as="p" variant="bodyMd" tone="subdued">
-              Import serial numbers in bulk without assigning them to any product. These can be assigned later using the product assignment feature.
-            </Text>
-
             <DropZone
               label="CSV File"
               onDrop={handleCsvFileSelect}
@@ -948,11 +914,6 @@ export default function Dashboard() {
             >
               <DropZone.FileUpload />
             </DropZone>
-
-            <Text as="p" variant="bodyMd" tone="subdued">
-              CSV format: One serial number per line, or comma-separated values.
-              Example: SN001, SN002, SN003 or one per line. These serials will be imported as unassigned and can be assigned to products later.
-            </Text>
 
             {/* CSV Preview Section */}
             {showCsvPreview && csvPreviewData.length > 0 && (
@@ -1022,7 +983,6 @@ export default function Dashboard() {
                                     handleCancelEdit();
                                   }
                                 }}
-                                autoFocus
                               />
                               <Button size="micro" variant="primary" onClick={handleSaveEdit}>
                                 ✓
@@ -1120,22 +1080,27 @@ export default function Dashboard() {
       >
         <Modal.Section>
           <FormLayout>
+            {selectedSerialForEdit && (
+              <BlockStack gap="200">
+                <Text as="p" variant="bodyMd">
+                  <strong>Current Status:</strong> <Badge tone={getBadgeTone(selectedSerialForEdit.status)}>
+                    {selectedSerialForEdit.status}
+                  </Badge>
+                </Text>
+                {selectedSerialForEdit.product && (
+                  <Text as="p" variant="bodyMd">
+                    <strong>Assigned to:</strong> {selectedSerialForEdit.product.title} - {selectedSerialForEdit.variant?.title || 'Default Variant'}
+                  </Text>
+                )}
+              </BlockStack>
+            )}
+
             <TextField
               label="Serial Number"
               value={editSerialNumber}
               onChange={setEditSerialNumber}
               placeholder="Enter serial number"
               autoComplete="off"
-              helpText="Enter a unique serial number for tracking"
-            />
-
-            <Select
-              label="Product Variant (Optional)"
-              options={variantOptions}
-              value={editSelectedVariant}
-              onChange={setEditSelectedVariant}
-              placeholder="Select a product variant (optional)"
-              helpText="Leave empty to create unassigned serial numbers"
             />
           </FormLayout>
         </Modal.Section>

@@ -14,163 +14,209 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     const formData = await request.formData();
     const csvFile = formData.get("csvFile") as File;
-    const variantId = formData.get("variantId") as string;
-    const productId = formData.get("productId") as string;
 
     if (!csvFile) {
-      return data({ 
-        success: false, 
-        message: "CSV file is required" 
-      }, { status: 400 });
-    }
-
-    if (!variantId || !productId) {
-      return data({ 
-        success: false, 
-        message: "Variant ID and Product ID are required" 
+      return data({
+        success: false,
+        message: "CSV file is required"
       }, { status: 400 });
     }
 
     // Read CSV content
     const csvContent = await csvFile.text();
-    
+
     if (!csvContent.trim()) {
-      return data({ 
-        success: false, 
-        message: "CSV file is empty" 
+      return data({
+        success: false,
+        message: "CSV file is empty"
       }, { status: 400 });
     }
 
-    // Parse CSV content using csv-parse library
+    // Parse CSV content - expecting 3 columns: Product Title, Variant Title (or NULL), Serial Number
     let records;
-    const serialNumbers: string[] = [];
-    
+
     try {
-      // Try parsing as proper CSV first
       records = parse(csvContent, {
         skip_empty_lines: true,
         trim: true,
-        relaxColumnCount: true
+        relaxColumnCount: false, // Enforce column count
+        columns: false // Don't use first row as headers
       });
-      
-      // Extract serial numbers from records
-      for (const record of records) {
-        if (Array.isArray(record)) {
-          // Multiple columns - take all non-empty values as serials
-          for (const value of record) {
-            const serial = value?.toString().trim();
-            if (serial) {
-              serialNumbers.push(serial);
-            }
-          }
-        } else {
-          // Single column
-          const serial = record?.toString().trim();
-          if (serial) {
-            serialNumbers.push(serial);
-          }
-        }
-      }
     } catch (csvError) {
-      // If CSV parsing fails, fall back to simple line-by-line parsing
-      console.log('CSV parsing failed, falling back to simple parsing:', csvError);
-      const lines = csvContent.split('\n').filter(line => line.trim());
-      
-      for (const line of lines) {
-        if (line.includes(',')) {
-          // Comma-separated values
-          const rowSerials = line.split(',').map(s => s.trim()).filter(s => s);
-          serialNumbers.push(...rowSerials);
-        } else {
-          // One per line
-          const serial = line.trim();
-          if (serial) {
-            serialNumbers.push(serial);
-          }
-        }
-      }
-    }
-
-    if (serialNumbers.length === 0) {
-      return data({ 
-        success: false, 
-        message: "No valid serial numbers found in CSV" 
+      console.error('CSV parsing failed:', csvError);
+      return data({
+        success: false,
+        message: "Invalid CSV format. Expected format: Product Title, Variant Title (or NULL), Serial Number"
       }, { status: 400 });
     }
 
-    // Remove duplicates
-    const uniqueSerials = [...new Set(serialNumbers)];
+    if (records.length === 0) {
+      return data({
+        success: false,
+        message: "No records found in CSV"
+      }, { status: 400 });
+    }
 
-    console.log(`Importing ${uniqueSerials.length} serial numbers for variant ${variantId}`);
+    // Process records and build import data
+    const importData: Array<{
+      productTitle: string;
+      variantTitle: string | null;
+      serialNumber: string;
+    }> = [];
+
+    const errors: string[] = [];
+
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+
+      if (!Array.isArray(record) || record.length < 3) {
+        errors.push(`Row ${i + 1}: Invalid format - expected 3 columns`);
+        continue;
+      }
+
+      const productTitle = record[0]?.toString().trim();
+      const variantTitle = record[1]?.toString().trim();
+      const serialNumber = record[2]?.toString().trim();
+
+      if (!productTitle) {
+        errors.push(`Row ${i + 1}: Product title is required`);
+        continue;
+      }
+
+      if (!serialNumber) {
+        errors.push(`Row ${i + 1}: Serial number is required`);
+        continue;
+      }
+
+      // Check if variant title is NULL or empty
+      const finalVariantTitle = (!variantTitle || variantTitle.toUpperCase() === 'NULL') ? null : variantTitle;
+
+      importData.push({
+        productTitle,
+        variantTitle: finalVariantTitle,
+        serialNumber
+      });
+    }
+
+    if (errors.length > 0 && importData.length === 0) {
+      return data({
+        success: false,
+        message: `CSV validation failed: ${errors.join('; ')}`
+      }, { status: 400 });
+    }
+
+    console.log(`Processing ${importData.length} serial numbers from CSV`);
 
     // Import serials in transaction
     const result = await prisma.$transaction(async (tx) => {
-      // Check for existing serials
-      const existingSerials = await tx.serial.findMany({
-        where: {
-          serialNumber: {
-            in: uniqueSerials
+      const created: string[] = [];
+      const skipped: string[] = [];
+      const notFound: string[] = [];
+
+      for (const item of importData) {
+        // Look up product by title
+        const product = await tx.product.findFirst({
+          where: {
+            title: {
+              equals: item.productTitle,
+              mode: 'insensitive'
+            },
+            shop: session.shop
+          },
+          include: {
+            variants: true
           }
-        },
-        select: {
-          serialNumber: true
+        });
+
+        if (!product) {
+          notFound.push(`Product "${item.productTitle}" not found`);
+          continue;
         }
-      });
 
-      const existingNumbers = existingSerials.map(s => s.serialNumber);
-      const newSerials = uniqueSerials.filter(sn => !existingNumbers.includes(sn));
+        // Look up variant if specified
+        let variantId: string | null = null;
+        if (item.variantTitle) {
+          const variant = product.variants.find(v =>
+            v.title.toLowerCase() === item.variantTitle!.toLowerCase()
+          );
 
-      if (newSerials.length === 0) {
-        throw new Error("All serial numbers already exist in the database");
+          if (!variant) {
+            notFound.push(`Variant "${item.variantTitle}" not found for product "${item.productTitle}"`);
+            continue;
+          }
+
+          variantId = variant.id;
+        } else {
+          // If no variant specified, use the first/default variant
+          if (product.variants.length > 0) {
+            variantId = product.variants[0].id;
+          }
+        }
+
+        // Check if serial number already exists
+        const existingSerial = await tx.serial.findUnique({
+          where: { serialNumber: item.serialNumber }
+        });
+
+        if (existingSerial) {
+          skipped.push(item.serialNumber);
+          continue;
+        }
+
+        // Create serial with AVAILABLE status
+        await tx.serial.create({
+          data: {
+            serialNumber: item.serialNumber,
+            productId: product.id,
+            variantId: variantId,
+            status: 'AVAILABLE',
+            shop: session.shop
+          }
+        });
+
+        created.push(item.serialNumber);
       }
 
-      // Create new serials
-      const createData = newSerials.map(serialNumber => ({
-        serialNumber,
-        productId,
-        variantId,
-        status: 'AVAILABLE' as const,
-        shop: session.shop,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      }));
-
-      const createResult = await tx.serial.createMany({
-        data: createData
-      });
-
       return {
-        created: createResult.count,
-        duplicates: existingNumbers.length,
-        total: uniqueSerials.length
+        created: created.length,
+        skipped: skipped.length,
+        notFound: notFound.length,
+        total: importData.length,
+        errors: notFound.length > 0 ? notFound.slice(0, 10) : [], // Return first 10 errors
+        validationErrors: errors.length > 0 ? errors.slice(0, 10) : []
       };
     });
 
+    const message = result.created > 0
+      ? `Successfully imported ${result.created} serial numbers. ${result.skipped > 0 ? `Skipped ${result.skipped} duplicates.` : ''} ${result.notFound > 0 ? `${result.notFound} items not found.` : ''}`
+      : `No serials imported. ${result.skipped > 0 ? `${result.skipped} duplicates found.` : ''} ${result.notFound > 0 ? `${result.notFound} items not found.` : ''}`;
+
     return data({
-      success: true,
-      message: `Successfully imported ${result.created} serial numbers`,
+      success: result.created > 0,
+      message,
       data: {
         created: result.created,
-        duplicates: result.duplicates,
+        skipped: result.skipped,
+        notFound: result.notFound,
         total: result.total,
-        variantId,
-        productId
+        errors: result.errors,
+        validationErrors: result.validationErrors
       }
     });
 
   } catch (error) {
     console.error("Error importing serials:", error);
-    
+
     if (error instanceof Error) {
-      return data({ 
-        success: false, 
-        message: error.message 
+      return data({
+        success: false,
+        message: error.message
       }, { status: 400 });
     }
 
-    return data({ 
-      success: false, 
-      message: "Internal server error" 
+    return data({
+      success: false,
+      message: "Internal server error"
     }, { status: 500 });
   }
 };

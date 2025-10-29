@@ -46,14 +46,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             shop: shop
           },
           data: {
-            status: 'RETURNED',
-            returnedAt: new Date(),
+            status: 'ASSIGNED',
+            orderId: null,
+            soldAt: null,
             updatedAt: new Date()
           }
         });
 
 
-        console.log(`Marked ${result.count} serials as returned for full refund of order ${orderId}`);
+        console.log(`Marked ${result.count} serials back to ASSIGNED status for full refund of order ${orderId}`);
         return { count: result.count, serials: soldSerials };
       });
 

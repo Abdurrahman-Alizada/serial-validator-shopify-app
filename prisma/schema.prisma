@@ -87,6 +87,7 @@ model Serial {
 
 enum SerialStatus {
   AVAILABLE
+  ASSIGNED
   RESERVED
   SOLD
   RETURNED

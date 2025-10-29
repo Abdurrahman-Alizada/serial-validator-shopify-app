@@ -83,7 +83,7 @@ export async function updateSerialStatus({
   status,
 }: {
   id: string;
-  status: "AVAILABLE" | "SOLD" | "RETURNED" | "DELETED";
+  status: "AVAILABLE" | "ASSIGNED" | "RESERVED" | "SOLD" | "RETURNED" | "DELETED";
 }) {
   return await prisma.serial.update({
     where: { id },
@@ -122,42 +122,52 @@ export async function assignSerialsToVariant({
   serialIds,
   productId,
   variantId,
-  orderId,
 }: {
   serialIds: string[];
   productId: string;
   variantId: string;
-  orderId?: string;
 }) {
-  // Allow multiple serials for the same variant (for quantity > 1)
+  // Allow multiple serials for the same variant
   if (serialIds.length === 0) {
     throw new Error("At least one serial number must be provided");
   }
 
-  // Check if any of these serials are already assigned to an order
-  const alreadyAssigned = await prisma.serial.findMany({
+  // Validate that serials are AVAILABLE and either:
+  // 1. Already belong to this product/variant, OR
+  // 2. Are unassigned (no productId/variantId)
+  const serials = await prisma.serial.findMany({
     where: {
       id: { in: serialIds },
-      status: { in: ["RESERVED", "SOLD"] }
+      status: "AVAILABLE",
+      OR: [
+        {
+          productId,
+          variantId,
+        },
+        {
+          productId: null,
+          variantId: null,
+        }
+      ]
     },
-    select: { serialNumber: true, status: true }
+    select: { id: true, serialNumber: true, productId: true, variantId: true }
   });
 
-  if (alreadyAssigned.length > 0) {
-    throw new Error(`Some serial numbers are already assigned: ${alreadyAssigned.map(s => `${s.serialNumber} (${s.status})`).join(', ')}`);
+  if (serials.length !== serialIds.length) {
+    throw new Error("Some serials are not available, already assigned to another product, or in use");
   }
 
-  // Update only available/unassigned serials
+  // Update serials to be assigned to this product/variant
+  // This will set productId/variantId for unassigned serials
+  // AND change status from AVAILABLE to ASSIGNED
   return await prisma.serial.updateMany({
     where: {
       id: { in: serialIds },
-      status: "AVAILABLE"
     },
     data: {
       productId,
       variantId,
-      orderId: orderId || null,
-      status: "RESERVED",
+      status: "ASSIGNED",
     },
   });
 }
@@ -168,14 +178,101 @@ export async function releaseSerialsFromVariant({
   serialIds: string[];
 }) {
   return await prisma.serial.updateMany({
-    where: { 
+    where: {
       id: { in: serialIds },
-      status: { in: ["RESERVED", "AVAILABLE"] }
+      status: { in: ["RESERVED", "ASSIGNED", "AVAILABLE"] }
     },
     data: {
       productId: null,
       variantId: null,
       status: "AVAILABLE",
+    },
+  });
+}
+
+export async function getAvailableSerialsForVariant({
+  productId,
+  variantId,
+  shop,
+  status = "AVAILABLE"
+}: {
+  productId: string;
+  variantId: string;
+  shop: string;
+  status?: string;
+}) {
+  // Get serials that are either:
+  // 1. Already assigned to this specific product/variant with AVAILABLE status
+  // 2. Unassigned (no productId/variantId) with AVAILABLE status
+  return await prisma.serial.findMany({
+    where: {
+      shop,
+      status,
+      OR: [
+        {
+          // Already assigned to this product/variant
+          productId,
+          variantId,
+        },
+        {
+          // Unassigned serials
+          productId: null,
+          variantId: null,
+        }
+      ]
+    },
+    orderBy: { serialNumber: 'asc' }
+  });
+}
+
+export async function getAssignedSerialsForVariant({
+  productId,
+  variantId,
+  shop
+}: {
+  productId: string;
+  variantId: string;
+  shop: string;
+}) {
+  return await prisma.serial.findMany({
+    where: {
+      productId,
+      variantId,
+      shop,
+      status: "ASSIGNED"
+    },
+    orderBy: { serialNumber: 'asc' }
+  });
+}
+
+export async function reserveSerialsForOrder({
+  serialIds,
+  orderId,
+}: {
+  serialIds: string[];
+  orderId?: string;
+}) {
+  // Check if serials are ASSIGNED status
+  const serials = await prisma.serial.findMany({
+    where: {
+      id: { in: serialIds },
+      status: "ASSIGNED"
+    },
+    select: { id: true, serialNumber: true }
+  });
+
+  if (serials.length !== serialIds.length) {
+    throw new Error("Some serials are not in ASSIGNED status");
+  }
+
+  // Change status from ASSIGNED to RESERVED
+  return await prisma.serial.updateMany({
+    where: {
+      id: { in: serialIds },
+    },
+    data: {
+      status: "RESERVED",
+      orderId: orderId || null,
     },
   });
 }

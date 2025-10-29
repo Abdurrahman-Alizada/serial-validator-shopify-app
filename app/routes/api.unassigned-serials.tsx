@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
-import { getUnassignedSerials } from "../db.server";
+import { getAssignedSerialsForVariant } from "../db.server";
+import prisma from "../db.server";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -19,6 +20,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const url = new URL(request.url);
     const shop = url.searchParams.get("shop");
+    const productId = url.searchParams.get("productId");
+    const variantId = url.searchParams.get("variantId");
 
     if (!shop) {
       return data({
@@ -27,19 +30,42 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }, { status: 400, headers: corsHeaders });
     }
 
-    const unassignedSerials = await getUnassignedSerials(shop);
+    // If productId and variantId are provided, return ASSIGNED serials for that specific variant
+    if (productId && variantId) {
+      const assignedSerials = await getAssignedSerialsForVariant({
+        productId,
+        variantId,
+        shop
+      });
+
+      return data({
+        success: true,
+        message: "Assigned serials fetched successfully",
+        count: assignedSerials.length,
+        data: assignedSerials
+      }, { headers: corsHeaders });
+    }
+
+    // Otherwise, return all ASSIGNED serials for the shop (for backward compatibility)
+    const allAssignedSerials = await prisma.serial.findMany({
+      where: {
+        shop,
+        status: "ASSIGNED"
+      },
+      orderBy: { serialNumber: 'asc' }
+    });
 
     return data({
       success: true,
-      message: "Unassigned serials fetched successfully",
-      count: unassignedSerials.length,
-      data: unassignedSerials
+      message: "Assigned serials fetched successfully",
+      count: allAssignedSerials.length,
+      data: allAssignedSerials
     }, { headers: corsHeaders });
   } catch (error) {
-    console.error("Error fetching unassigned serials:", error);
+    console.error("Error fetching serials:", error);
     return data({
       success: false,
-      message: "Failed to fetch unassigned serials",
+      message: "Failed to fetch serials",
       error: String(error)
     }, { status: 500, headers: corsHeaders });
   }

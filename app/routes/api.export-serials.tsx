@@ -62,24 +62,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // CSV format
     const csvHeaders = [
       "Serial Number",
-      "Status", 
+      "Status",
       "Product Title",
+      "Product Handle",
       "Variant Title",
       "SKU",
       "Order ID",
       "Sold At",
-      "Created At"
+      "Created At",
+      "Updated At"
     ];
 
     const csvRows = serials.map(serial => [
       serial.serialNumber,
       serial.status,
       serial.product?.title || '',
+      serial.product?.handle || '',
       serial.variant?.title || '',
       serial.variant?.sku || '',
       serial.orderId || '',
-      serial.soldAt ? serial.soldAt.toISOString() : '',
-      serial.createdAt.toISOString()
+      serial.soldAt ? new Date(serial.soldAt).toLocaleString('en-US') : '',
+      new Date(serial.createdAt).toLocaleString('en-US'),
+      new Date(serial.updatedAt).toLocaleString('en-US')
     ]);
 
     const csvContent = [

@@ -16,20 +16,19 @@ import {
   FormLayout,
   Checkbox,
   Badge,
-  Banner,
   Spinner,
   EmptyState,
   SkeletonBodyText,
   SkeletonDisplayText
 } from "@shopify/polaris";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import prisma, {
   syncProduct,
   syncProductVariant,
   updateVariantSerialRequirement,
   updateProductSerialRequirement,
-  getUnassignedSerials,
+  getAvailableSerialsForVariant,
   assignSerialsToVariant,
   releaseSerialsFromVariant
 } from "../db.server";
@@ -105,26 +104,47 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           inventoryQty: variant.inventoryQuantity,
         });
 
-        // Get serial information for this variant
-        const serialCount = await prisma.serial.count({
-          where: { variantId: dbVariant.id },
+        // Get serial counts for this variant
+        const availableCount = await prisma.serial.count({
+          where: {
+            variantId: dbVariant.id,
+            status: 'AVAILABLE'
+          },
         });
 
-        const assignedSerial = await prisma.serial.findFirst({
-          where: { 
+        const assignedCount = await prisma.serial.count({
+          where: {
             variantId: dbVariant.id,
-            status: { in: ["RESERVED", "SOLD"] }
+            status: {
+              in: ['ASSIGNED', 'RESERVED', 'SOLD', 'RETURNED']
+            }
           },
-          select: { 
+        });
+
+        // Get all serial numbers for display (all statuses)
+        const assignedSerials = await prisma.serial.findMany({
+          where: {
+            variantId: dbVariant.id,
+            status: {
+              in: ['ASSIGNED', 'RESERVED', 'SOLD', 'RETURNED']
+            }
+          },
+          select: {
             serialNumber: true,
-            status: true 
-          }
+            status: true
+          },
+          orderBy: [
+            { status: 'asc' },
+            { serialNumber: 'asc' }
+          ],
+          take: 3 // Limit to first 3 for display
         });
 
         variants.push({
           ...dbVariant,
-          _count: { serials: serialCount },
-          assignedSerial
+          availableCount,
+          assignedCount,
+          assignedSerials
         });
       }
 
@@ -134,13 +154,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       });
     }
 
-    // Get unassigned serials for the assignment modal
-    const unassignedSerials = await getUnassignedSerials(session.shop);
-
-    return { products: dbProducts, unassignedSerials };
+    return { products: dbProducts };
   } catch (error) {
     console.error('Error fetching products:', error);
-    return { products: [], unassignedSerials: [] };
+    return { products: [] };
   }
 };
 
@@ -191,6 +208,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { success: true };
     }
 
+    if (intent === "assignSerials") {
+      const serialIds = JSON.parse(formData.get("serialIds") as string);
+      const variantId = formData.get("variantId") as string;
+      const productId = formData.get("productId") as string;
+
+      if (!serialIds || !Array.isArray(serialIds) || serialIds.length === 0) {
+        return { success: false, message: "No serial numbers selected" };
+      }
+
+      // Assign the serials (change status from AVAILABLE to ASSIGNED)
+      await assignSerialsToVariant({
+        serialIds,
+        productId,
+        variantId,
+      });
+
+      return { success: true, message: `Successfully assigned ${serialIds.length} serial number${serialIds.length > 1 ? 's' : ''}` };
+    }
+
     if (intent === "assignAndEnable") {
       const serialIds = JSON.parse(formData.get("serialIds") as string);
       const variantId = formData.get("variantId") as string;
@@ -200,7 +236,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return { success: false, message: "No serial numbers selected" };
       }
 
-      // First assign the serials
+      // First assign the serials (change status from AVAILABLE to ASSIGNED)
       await assignSerialsToVariant({
         serialIds,
         productId,
@@ -219,7 +255,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         requireSerial: true
       });
 
-      return { success: true, message: `Successfully assigned ${serialIds.length} serial numbers and enabled requirement` };
+      return { success: true, message: `Successfully assigned ${serialIds.length} serial number${serialIds.length > 1 ? 's' : ''} and enabled requirement` };
     }
 
     if (intent === "enableOnly") {
@@ -249,18 +285,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Products() {
-  const { products, unassignedSerials } = useLoaderData<typeof loader>();
+  const { products } = useLoaderData<typeof loader>();
   const fetcher = useFetcher();
   const [searchValue, setSearchValue] = useState('');
   const [productTypeFilter, setProductTypeFilter] = useState('All');
   const [vendorFilter, setVendorFilter] = useState('All');
   const [assignmentModalActive, setAssignmentModalActive] = useState(false);
-  const [selectedVariant, setSelectedVariant] = useState<{id: string, productId: string, title: string, productTitle: string} | null>(null);
-  const [selectedSerial, setSelectedSerial] = useState<string>('');
+  const [serialDetailsModalActive, setSerialDetailsModalActive] = useState(false);
+  const [selectedVariant, setSelectedVariant] = useState<{id: string, productId: string, title: string, productTitle: string, inventoryQty: number, assignedCount: number} | null>(null);
+  const [selectedSerialIds, setSelectedSerialIds] = useState<string[]>([]);
+  const [availableSerials, setAvailableSerials] = useState<Array<{id: string, serialNumber: string}>>([]);
+  const [viewingSerials, setViewingSerials] = useState<Array<{id: string, serialNumber: string, status: string, orderId?: string | null}>>([]);
+  const [loadingSerials, setLoadingSerials] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState('25');
+  const [togglingVariantId, setTogglingVariantId] = useState<string | null>(null);
 
   const isLoading = fetcher.state === "submitting" || fetcher.state === "loading";
+
+  // Clear toggling state when fetcher completes
+  useEffect(() => {
+    if (fetcher.state === "idle" && togglingVariantId) {
+      setTogglingVariantId(null);
+    }
+  }, [fetcher.state, togglingVariantId]);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchValue(value);
@@ -310,19 +358,42 @@ export default function Products() {
     setCurrentPage(1); // Reset to first page when changing items per page
   }, []);
 
-  const handleToggleSerial = useCallback((variant: any, product: any, currentValue: boolean) => {
+  const handleToggleSerial = useCallback(async (variant: any, product: any, currentValue: boolean) => {
     if (!currentValue) {
-      // Turning ON - show assignment modal
+      // Turning ON - show assignment modal with multiple selection
+      const variantWithCounts = variant as typeof variant & {
+        availableCount?: number;
+        assignedCount?: number;
+      };
+
       setSelectedVariant({
         id: variant.id,
         productId: product.id,
         title: variant.title || 'Default Variant',
-        productTitle: product.title
+        productTitle: product.title,
+        inventoryQty: variant.inventoryQty || 0,
+        assignedCount: variantWithCounts.assignedCount || 0
       });
-      setSelectedSerial('');
+      setSelectedSerialIds([]);
       setAssignmentModalActive(true);
+
+      // Fetch available serials for this variant
+      setLoadingSerials(true);
+      try {
+        const response = await fetch(`/api/available-serials?productId=${product.id}&variantId=${variant.id}`);
+        const data = await response.json();
+        if (data.success && data.serials) {
+          setAvailableSerials(data.serials);
+        }
+      } catch (error) {
+        console.error('Error fetching serials:', error);
+        setAvailableSerials([]);
+      } finally {
+        setLoadingSerials(false);
+      }
     } else {
       // Turning OFF - just toggle without modal
+      setTogglingVariantId(variant.id);
       fetcher.submit(
         {
           intent: 'toggleVariantSerial',
@@ -335,42 +406,141 @@ export default function Products() {
     }
   }, [fetcher]);
 
-  const handleAssignSerials = useCallback((variant: any, product: any) => {
+  const handleAssignSerials = useCallback(async (variant: any, product: any) => {
+    const variantWithCounts = variant as typeof variant & {
+      availableCount?: number;
+      assignedCount?: number;
+    };
+
     setSelectedVariant({
       id: variant.id,
       productId: product.id,
       title: variant.title || 'Default Variant',
-      productTitle: product.title
+      productTitle: product.title,
+      inventoryQty: variant.inventoryQty || 0,
+      assignedCount: variantWithCounts.assignedCount || 0
     });
-    setSelectedSerial('');
+    setSelectedSerialIds([]);
     setAssignmentModalActive(true);
+
+    // Fetch available serials for this variant
+    setLoadingSerials(true);
+    try {
+      const response = await fetch(`/api/available-serials?productId=${product.id}&variantId=${variant.id}`);
+      const data = await response.json();
+      if (data.success && data.serials) {
+        setAvailableSerials(data.serials);
+      }
+    } catch (error) {
+      console.error('Error fetching serials:', error);
+      setAvailableSerials([]);
+    } finally {
+      setLoadingSerials(false);
+    }
   }, []);
 
   const handleCloseAssignmentModal = useCallback(() => {
     setAssignmentModalActive(false);
     setSelectedVariant(null);
-    setSelectedSerial('');
+    setSelectedSerialIds([]);
+    setAvailableSerials([]);
   }, []);
 
-  const handleSerialSelection = useCallback((serialId: string) => {
-    setSelectedSerial(serialId);
+  const handleViewSerials = useCallback(async (variant: any, product: any) => {
+    const variantWithCounts = variant as typeof variant & {
+      assignedSerials?: Array<{ serialNumber: string; status: string }>;
+    };
+
+    setSelectedVariant({
+      id: variant.id,
+      productId: product.id,
+      title: variant.title || 'Default Variant',
+      productTitle: product.title,
+      inventoryQty: variant.inventoryQty || 0,
+      assignedCount: variantWithCounts.assignedSerials?.length || 0
+    });
+
+    // Fetch all serials for this variant (all statuses)
+    setLoadingSerials(true);
+    try {
+      const response = await fetch(`/api/variant-serials?productId=${product.id}&variantId=${variant.id}`);
+      const data = await response.json();
+      if (data.success && data.serials) {
+        setViewingSerials(data.serials);
+      }
+    } catch (error) {
+      console.error('Error fetching serials:', error);
+      setViewingSerials([]);
+    } finally {
+      setLoadingSerials(false);
+    }
+
+    setSerialDetailsModalActive(true);
   }, []);
 
+  const handleCloseSerialDetailsModal = useCallback(() => {
+    setSerialDetailsModalActive(false);
+    setSelectedVariant(null);
+    setViewingSerials([]);
+  }, []);
+
+  const handleToggleSerialSelection = useCallback((serialId: string) => {
+    setSelectedSerialIds(prev => {
+      if (prev.includes(serialId)) {
+        // Deselecting - always allow
+        return prev.filter(id => id !== serialId);
+      } else {
+        // Selecting - check inventory limit
+        if (!selectedVariant) return prev;
+
+        const currentAssigned = selectedVariant.assignedCount;
+        const newTotal = currentAssigned + prev.length + 1;
+        const inventoryLimit = selectedVariant.inventoryQty;
+
+        // Only allow if we haven't exceeded inventory
+        if (newTotal <= inventoryLimit) {
+          return [...prev, serialId];
+        }
+        return prev;
+      }
+    });
+  }, [selectedVariant]);
 
   const handleSubmitAssignment = useCallback(() => {
-    if (!selectedVariant || !selectedSerial) return;
+    if (!selectedVariant) return;
 
-    // Create a single form submission that handles both actions
+    // Check if assignment would exceed inventory
+    if (selectedSerialIds.length > 0) {
+      const totalAssigned = selectedVariant.assignedCount + selectedSerialIds.length;
+      if (totalAssigned > selectedVariant.inventoryQty) {
+        // This shouldn't happen due to UI restrictions, but double-check
+        alert(`Cannot assign ${selectedSerialIds.length} serials. Total would be ${totalAssigned} but inventory is only ${selectedVariant.inventoryQty}.`);
+        return;
+      }
+    }
+
     const formData = new FormData();
-    formData.append('intent', 'assignAndEnable');
-    formData.append('serialIds', JSON.stringify([selectedSerial]));
-    formData.append('variantId', selectedVariant.id);
-    formData.append('productId', selectedVariant.productId);
+
+    if (selectedSerialIds.length > 0) {
+      // Assign serials AND enable requirement
+      formData.append('intent', 'assignAndEnable');
+      formData.append('serialIds', JSON.stringify(selectedSerialIds));
+      formData.append('variantId', selectedVariant.id);
+      formData.append('productId', selectedVariant.productId);
+    } else {
+      // Just enable requirement without assigning
+      formData.append('intent', 'enableOnly');
+      formData.append('variantId', selectedVariant.id);
+      formData.append('productId', selectedVariant.productId);
+    }
+
+    // Track which variant is being toggled
+    setTogglingVariantId(selectedVariant.id);
 
     fetcher.submit(formData, { method: 'post' });
 
     handleCloseAssignmentModal();
-  }, [fetcher, selectedVariant, selectedSerial, handleCloseAssignmentModal]);
+  }, [fetcher, selectedVariant, selectedSerialIds, handleCloseAssignmentModal]);
 
   // Generate dynamic filter options based on actual data and current filters
   const getAvailableProductTypes = () => {
@@ -495,53 +665,82 @@ export default function Products() {
 
   // Generate rows from paginated variant data
   const rows = paginatedVariants.map(({ product, variant }) => {
-    const variantWithSerial = variant as typeof variant & {
-      _count?: { serials: number };
-      assignedSerial?: { serialNumber: string; status: string } | null;
+    const variantWithCounts = variant as typeof variant & {
+      availableCount?: number;
+      assignedCount?: number;
+      assignedSerials?: Array<{ serialNumber: string; status: string }>;
     };
+
+    const availableCount = variantWithCounts.availableCount || 0;
+    const assignedCount = variantWithCounts.assignedCount || 0;
+    const assignedSerials = variantWithCounts.assignedSerials || [];
+
+    const inventoryQty = variant.inventoryQty || 0;
+    const inventoryStatus =
+      assignedCount > inventoryQty ? 'critical' :
+      assignedCount === inventoryQty ? 'success' :
+      'subdued';
 
     return [
       product.title,
       variant.title || 'Default Variant',
       variant.sku || '-',
-      variantWithSerial.assignedSerial?.serialNumber || '-',
-      variantWithSerial.assignedSerial ? (
-        <Badge
-          key={`status-${variant.id}`}
-          tone={variantWithSerial.assignedSerial.status === 'RESERVED' ? 'warning' : 'info'}
-        >
-          {variantWithSerial.assignedSerial.status}
-        </Badge>
-      ) : '-',
+      <Text key={`inventory-${variant.id}`} as="span">{inventoryQty}</Text>,
+      <Text key={`assigned-${variant.id}`} as="span" tone={inventoryStatus}>{assignedCount}</Text>,
+      assignedSerials.length > 0 ? (
+        <BlockStack key={`serials-${variant.id}`} gap="100">
+          <InlineStack gap="100" wrap>
+            {assignedSerials.slice(0, 3).map((serial, idx) => (
+              <Badge
+                key={idx}
+                tone={
+                  serial.status === 'AVAILABLE' ? 'info' :
+                  serial.status === 'ASSIGNED' ? 'success' :
+                  serial.status === 'RESERVED' ? 'warning' :
+                  serial.status === 'SOLD' ? undefined :
+                  serial.status === 'RETURNED' ? 'critical' : 'info'
+                }
+              >
+                {serial.serialNumber}
+              </Badge>
+            ))}
+            {assignedCount > 3 && (
+              <Badge tone="info">
+                +{assignedCount - 3} more
+              </Badge>
+            )}
+          </InlineStack>
+        </BlockStack>
+      ) : (
+        <Text key={`no-serials-${variant.id}`} as="span" tone="subdued">-</Text>
+      ),
       <Toggle
         key={`toggle-${variant.id}`}
         checked={variant.requireSerial}
         onChange={() => handleToggleSerial(variant, product, variant.requireSerial)}
-        disabled={isLoading}
+        disabled={togglingVariantId === variant.id}
       />,
       <InlineStack key={`actions-${variant.id}`} gap="200">
-        {variant.requireSerial && !variantWithSerial.assignedSerial && (
+        {assignedCount > 0 && (
+          <Button
+            size="micro"
+            variant="plain"
+            onClick={() => handleViewSerials(variant, product)}
+            accessibilityLabel="View serial details"
+          >
+            🔍
+          </Button>
+        )}
+        {(availableCount > 0 || (variant.requireSerial && assignedCount < inventoryQty)) && (
           <Button
             size="micro"
             variant="plain"
             onClick={() => handleAssignSerials(variant, product)}
-            disabled={unassignedSerials.length === 0 || isLoading}
-            loading={isLoading}
+            tone={assignedCount < inventoryQty ? "success" : undefined}
           >
-            📎 Assign
+            {assignedCount > 0 ? `+${inventoryQty - assignedCount}` : 'Assign'}
           </Button>
         )}
-        <Button size="micro" variant="plain" onClick={() => console.log('Edit', variant.id)}>
-          ✏️
-        </Button>
-        <Button
-          size="micro"
-          variant="plain"
-          tone="critical"
-          onClick={() => console.log('Delete', variant.id)}
-        >
-          🗑️
-        </Button>
       </InlineStack>
     ];
   });
@@ -572,10 +771,6 @@ export default function Products() {
     <Page title="Products">
       <BlockStack gap="400">
         <BlockStack gap="200">
-          <Text as="p" variant="bodyMd" tone="subdued">
-            Configure which product variants require serial numbers during POS checkout
-          </Text>
-          
           {/* Active Filters Display */}
           {(searchValue || productTypeFilter !== 'All' || vendorFilter !== 'All') && (
             <Card>
@@ -682,7 +877,8 @@ export default function Products() {
                     'text',
                     'text',
                     'text',
-                    'text',
+                    'numeric',
+                    'numeric',
                     'text',
                     'text',
                     'text',
@@ -691,8 +887,9 @@ export default function Products() {
                     'Product Name',
                     'Variant Name',
                     'SKU',
-                    'Assigned Serial',
-                    'Serial Status',
+                    'Inventory',
+                    'Assigned Serials',
+                    'Serial Numbers',
                     'Require Serial',
                     'Actions',
                   ]}
@@ -743,9 +940,11 @@ export default function Products() {
         onClose={handleCloseAssignmentModal}
         title={`Enable Serial Requirement for ${selectedVariant?.productTitle} - ${selectedVariant?.title}`}
         primaryAction={{
-          content: selectedSerial ? 'Select & Assign' : 'Select & Assign',
+          content: selectedSerialIds.length > 0
+            ? `Assign ${selectedSerialIds.length} Serial${selectedSerialIds.length !== 1 ? 's' : ''} & Enable`
+            : 'Enable Only',
           onAction: handleSubmitAssignment,
-          disabled: !selectedSerial || isLoading,
+          disabled: isLoading,
           loading: isLoading,
         }}
         secondaryActions={[
@@ -753,75 +952,176 @@ export default function Products() {
             content: 'Cancel',
             onAction: handleCloseAssignmentModal,
           },
-          {
-            content: 'Enable Only',
-            onAction: () => {
-              if (!selectedVariant) return;
-              
-              fetcher.submit(
-                {
-                  intent: 'enableOnly',
-                  variantId: selectedVariant.id,
-                  productId: selectedVariant.productId,
-                },
-                { method: 'post' }
-              );
-              
-              handleCloseAssignmentModal();
-            },
-            disabled: isLoading,
-          },
         ]}
       >
         <Modal.Section>
           <BlockStack gap="400">
-            <Text as="p" variant="bodyMd" tone="subdued">
-              You must assign one serial number to enable serial requirement for this variant. Each variant can only have one serial number assigned.
-            </Text>
-
-            {unassignedSerials.length === 0 ? (
-              <Banner status="warning">
+            {selectedVariant && (
+              <InlineStack gap="400" align="space-between">
                 <Text as="p" variant="bodyMd">
-                  No unassigned serial numbers available. You need to import serial numbers first using the bulk import feature before enabling serial requirement.
+                  <strong>Inventory:</strong> {selectedVariant.inventoryQty}
                 </Text>
-              </Banner>
+                <Text as="p" variant="bodyMd">
+                  <strong>Assigned:</strong> {selectedVariant.assignedCount}
+                </Text>
+                <Text as="p" variant="bodyMd">
+                  <strong>Available:</strong> {Math.max(0, selectedVariant.inventoryQty - selectedVariant.assignedCount)}
+                </Text>
+              </InlineStack>
+            )}
+
+            {loadingSerials ? (
+              <BlockStack gap="200">
+                <SkeletonBodyText lines={3} />
+              </BlockStack>
+            ) : availableSerials.length === 0 ? (
+              <EmptyState
+                heading="No available serials"
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <p>Import serials from the Dashboard first.</p>
+              </EmptyState>
             ) : (
               <Card>
                 <BlockStack gap="300">
-                  <Text as="h3" variant="headingSm">
-                    Available Unassigned Serial Numbers ({unassignedSerials.length})
-                  </Text>
+                  <InlineStack align="space-between">
+                    <Text as="h3" variant="headingSm">
+                      Available Serial Numbers ({availableSerials.length})
+                    </Text>
+                    {selectedSerialIds.length > 0 && (
+                      <Badge tone="info">
+                        {selectedSerialIds.length} selected
+                      </Badge>
+                    )}
+                  </InlineStack>
 
-                  <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid #e1e3e5', borderRadius: '6px', padding: '12px' }}>
+                  <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid #e1e3e5', borderRadius: '6px', padding: '12px' }}>
                     <BlockStack gap="200">
-                      {unassignedSerials.map((serial) => (
-                        <label key={serial.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                          <input
-                            type="radio"
-                            name="selectedSerial"
-                            value={serial.id}
-                            checked={selectedSerial === serial.id}
-                            onChange={() => handleSerialSelection(serial.id)}
-                            style={{ margin: 0 }}
-                          />
-                          <Text as="span" variant="bodyMd">{serial.serialNumber}</Text>
-                        </label>
-                      ))}
+                      {availableSerials.map((serial) => {
+                        const isSelected = selectedSerialIds.includes(serial.id);
+                        const currentAssigned = selectedVariant?.assignedCount || 0;
+                        const newTotal = currentAssigned + selectedSerialIds.length;
+                        const inventoryLimit = selectedVariant?.inventoryQty || 0;
+                        const canSelect = isSelected || newTotal < inventoryLimit;
+
+                        return (
+                          <label
+                            key={serial.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px',
+                              cursor: canSelect ? 'pointer' : 'not-allowed',
+                              padding: '8px',
+                              borderRadius: '4px',
+                              backgroundColor: isSelected ? '#f0f8ff' : 'transparent',
+                              opacity: canSelect ? 1 : 0.5
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              value={serial.id}
+                              checked={isSelected}
+                              onChange={() => handleToggleSerialSelection(serial.id)}
+                              disabled={!canSelect}
+                              style={{ margin: 0 }}
+                            />
+                            <Text as="span" variant="bodyMd">{serial.serialNumber}</Text>
+                            {!canSelect && !isSelected && (
+                              <Text as="span" variant="bodySm" tone="subdued">(Limit reached)</Text>
+                            )}
+                          </label>
+                        );
+                      })}
                     </BlockStack>
                   </div>
-
-                  {selectedSerial && (
-                    <Text as="p" variant="bodySm" tone="success">
-                      Serial selected for assignment
-                    </Text>
-                  )}
                 </BlockStack>
               </Card>
             )}
+          </BlockStack>
+        </Modal.Section>
+      </Modal>
 
-            <Text as="p" variant="bodySm" tone="subdued">
-              Note: Each variant can only have one serial number. Once assigned, this serial will be exclusively linked to this product variant and marked as reserved.
-            </Text>
+      {/* Serial Details Modal */}
+      <Modal
+        open={serialDetailsModalActive}
+        onClose={handleCloseSerialDetailsModal}
+        title={`Serial Numbers - ${selectedVariant?.productTitle} - ${selectedVariant?.title}`}
+        primaryAction={{
+          content: 'Close',
+          onAction: handleCloseSerialDetailsModal,
+        }}
+        secondaryActions={
+          selectedVariant && viewingSerials.length < selectedVariant.inventoryQty ? [
+            {
+              content: `Assign ${selectedVariant.inventoryQty - viewingSerials.length} More`,
+              onAction: () => {
+                handleCloseSerialDetailsModal();
+                // Find the variant data from products
+                const product = products.find(p => p.id === selectedVariant.productId);
+                const variant = product?.variants.find(v => v.id === selectedVariant.id);
+                if (variant && product) {
+                  handleAssignSerials(variant, product);
+                }
+              },
+            },
+          ] : undefined
+        }
+      >
+        <Modal.Section>
+          <BlockStack gap="400">
+            {selectedVariant && (
+              <InlineStack gap="400" align="space-between">
+                <Text as="p" variant="bodyMd">
+                  <strong>Inventory:</strong> {selectedVariant.inventoryQty}
+                </Text>
+                <Text as="p" variant="bodyMd">
+                  <strong>Total Assigned:</strong> {viewingSerials.length}
+                </Text>
+                <Text as="p" variant="bodyMd" tone={
+                  viewingSerials.length < selectedVariant.inventoryQty ? "critical" :
+                  viewingSerials.length === selectedVariant.inventoryQty ? "success" : "warning"
+                }>
+                  <strong>Remaining:</strong> {Math.max(0, selectedVariant.inventoryQty - viewingSerials.length)}
+                </Text>
+              </InlineStack>
+            )}
+
+            {loadingSerials ? (
+              <SkeletonBodyText lines={5} />
+            ) : viewingSerials.length === 0 ? (
+              <EmptyState
+                heading="No serials assigned"
+                image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
+              >
+                <p>No serial numbers have been assigned to this variant yet.</p>
+              </EmptyState>
+            ) : (
+              <Card>
+                <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                  <DataTable
+                    columnContentTypes={['text', 'text', 'text']}
+                    headings={['Serial Number', 'Status', 'Order ID']}
+                    rows={viewingSerials.map(serial => [
+                      serial.serialNumber,
+                      <Badge
+                        key={serial.serialNumber}
+                        tone={
+                          serial.status === 'AVAILABLE' ? 'info' :
+                          serial.status === 'ASSIGNED' ? 'success' :
+                          serial.status === 'RESERVED' ? 'warning' :
+                          serial.status === 'SOLD' ? undefined :
+                          serial.status === 'RETURNED' ? 'critical' : 'info'
+                        }
+                      >
+                        {serial.status}
+                      </Badge>,
+                      serial.orderId || '-'
+                    ])}
+                  />
+                </div>
+              </Card>
+            )}
           </BlockStack>
         </Modal.Section>
       </Modal>
